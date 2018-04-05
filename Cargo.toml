@@ -2,6 +2,7 @@
 name = "perf_events"
 version = "0.1.0"
 authors = ["Adam Perry <adam.n.perry@gmail.com>"]
+license = "MIT"
 
 [dependencies]
 errno = "0.2"
