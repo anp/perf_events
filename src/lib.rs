@@ -4,13 +4,12 @@ extern crate libc;
 // TODO logging
 // TODO better error handling
 
+use std::collections::BTreeMap;
 use std::io;
 use std::os::unix::io::RawFd;
 
 use errno::{errno, Errno};
 use libc::{c_int, pid_t, syscall, SYS_perf_event_open};
-
-use raw::perf_event_attr;
 
 pub struct Counts {}
 
@@ -42,22 +41,21 @@ impl CountsBuilder {
     pub fn add_event_counter(&mut self, event: Event) -> Result<(), Errno> {
         let raw = event.as_raw();
 
-        let pid = match self.pid {
-            PidConfig::Current => -1,
-            PidConfig::Other(p) => p,
-        };
-
-        let cpu = match self.cpu {
-            CpuConfig::All => -1,
-            CpuConfig::Specific(c) => c,
-        };
-
         let group_fd = match self.group_fd {
             Some(f) => f,
             None => -1,
         };
 
-        perf_event_open(&raw, pid, cpu, group_fd, flags)?;
+        let ret_fd = perf_event_open(
+            &raw,
+            self.pid.raw(),
+            self.cpu.raw(),
+            group_fd,
+            self.flags.bits,
+        )?;
+
+        self.group_fd = Some(ret_fd);
+
         Ok(())
     }
 
@@ -72,9 +70,27 @@ pub enum PidConfig {
     Other(pid_t),
 }
 
+impl PidConfig {
+    fn raw(&self) -> pid_t {
+        match *self {
+            PidConfig::Current => -1,
+            PidConfig::Other(p) => p,
+        }
+    }
+}
+
 pub enum CpuConfig {
     All,
     Specific(c_int),
+}
+
+impl CpuConfig {
+    fn raw(&self) -> c_int {
+        match *self {
+            CpuConfig::All => -1,
+            CpuConfig::Specific(c) => c,
+        }
+    }
 }
 
 fn perf_event_open(
@@ -124,7 +140,9 @@ impl Event {
         }
     }
 
-    fn as_raw(&self) -> raw::perf_event_attr {}
+    fn as_raw(&self) -> raw::perf_event_attr {
+        unimplemented!();
+    }
 }
 
 pub mod sw {
@@ -144,7 +162,6 @@ pub mod sw {
     impl Event {
         pub(crate) fn config(&self) -> u64 {
             use super::raw::perf_sw_ids::*;
-            use Event::*;
             let cfg = match *self {
                 CpuClock => PERF_COUNT_SW_CPU_CLOCK,
                 TaskClock => PERF_COUNT_SW_TASK_CLOCK,
@@ -180,7 +197,6 @@ pub mod hw {
     impl Event {
         pub(crate) fn config(&self) -> u64 {
             use super::raw::perf_hw_id::*;
-            use Event::*;
             let cfg = match *self {
                 CpuCycles => PERF_COUNT_HW_CPU_CYCLES,
                 Instructions => PERF_COUNT_HW_INSTRUCTIONS,
