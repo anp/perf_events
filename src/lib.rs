@@ -41,13 +41,6 @@ fn perf_event_open(
     }
 }
 
-impl Drop for Collector {
-    fn drop(&mut self) {
-        // TODO
-        unimplemented!();
-    }
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 enum Event {
     Hardware(hw::Event),
@@ -58,7 +51,7 @@ enum Event {
 impl Event {
     fn type_(&self) -> raw::perf_type_id {
         use raw::perf_type_id::*;
-        match self {
+        match *self {
             Event::Hardware(_) => PERF_TYPE_HARDWARE,
             Event::Software(_) => PERF_TYPE_SOFTWARE,
             Event::HardwareCache(_, _, _) => PERF_TYPE_HW_CACHE,
@@ -66,7 +59,7 @@ impl Event {
     }
 
     fn config(&self) -> u64 {
-        match self {
+        match *self {
             Event::Hardware(hw_id) => hw_id.config(),
             Event::Software(sw_id) => sw_id.config(),
             Event::HardwareCache(id, op_id, op_result_id) => {
@@ -94,7 +87,7 @@ pub mod sw {
         pub(crate) fn config(&self) -> u64 {
             use super::raw::perf_sw_ids::*;
             use Event::*;
-            let cfg = match self {
+            let cfg = match *self {
                 CpuClock => PERF_COUNT_SW_CPU_CLOCK,
                 TaskClock => PERF_COUNT_SW_TASK_CLOCK,
                 PageFaults => PERF_COUNT_SW_PAGE_FAULTS,
@@ -130,7 +123,7 @@ pub mod hw {
         pub(crate) fn config(&self) -> u64 {
             use super::raw::perf_hw_id::*;
             use Event::*;
-            let cfg = match self {
+            let cfg = match *self {
                 CpuCycles => PERF_COUNT_HW_CPU_CYCLES,
                 Instructions => PERF_COUNT_HW_INSTRUCTIONS,
                 CacheReferences => PERF_COUNT_HW_CACHE_REFERENCES,
@@ -163,7 +156,7 @@ pub mod hw {
             pub(crate) fn mask(&self) -> u64 {
                 use self::Id::*;
                 use super::super::raw::perf_hw_cache_id::*;
-                let mask = match self {
+                let mask = match *self {
                     Level1Data => PERF_COUNT_HW_CACHE_L1D,
                     Level1Instruction => PERF_COUNT_HW_CACHE_L1I,
                     LastLevel => PERF_COUNT_HW_CACHE_LL,
@@ -188,7 +181,7 @@ pub mod hw {
             pub(crate) fn mask(&self) -> u64 {
                 use self::OpId::*;
                 use raw::perf_hw_cache_op_id::*;
-                let mask = match self {
+                let mask = match *self {
                     Read => PERF_COUNT_HW_CACHE_OP_READ,
                     Write => PERF_COUNT_HW_CACHE_OP_WRITE,
                     Prefetch => PERF_COUNT_HW_CACHE_OP_PREFETCH,
@@ -207,7 +200,7 @@ pub mod hw {
             pub(crate) fn mask(&self) -> u64 {
                 use self::OpResultId::*;
                 use raw::perf_hw_cache_op_result_id::*;
-                let mask = match self {
+                let mask = match *self {
                     Access => PERF_COUNT_HW_CACHE_RESULT_ACCESS,
                     Miss => PERF_COUNT_HW_CACHE_RESULT_MISS,
                 };
