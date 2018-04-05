@@ -1,29 +1,80 @@
 extern crate errno;
 extern crate libc;
 
+// TODO logging
+// TODO better error handling
+
+use std::io;
 use std::os::unix::io::RawFd;
 
 use errno::{errno, Errno};
 use libc::{c_int, pid_t, syscall, SYS_perf_event_open};
 
-struct Collector {
-    group: c_int,
-    fds: Vec<c_int>,
-    pid: pid_t,
-    cpu: c_int,
+use raw::perf_event_attr;
+
+pub struct Counts {}
+
+impl Counts {
+    pub fn read(&mut self) -> io::Result<BTreeMap<Event, u64>> {
+        unimplemented!();
+    }
 }
 
-impl Collector {
-    pub fn new() -> Self {
+struct CountsBuilder {
+    pid: PidConfig,
+    cpu: CpuConfig,
+    counting: bool,
+    group_fd: Option<RawFd>,
+}
+
+impl CountsBuilder {
+    pub fn new(pid: PidConfig, cpu: CpuConfig) -> Self {
+        // TODO
+        unimplemented!();
+    }
+
+    pub fn count_all_available(&mut self) {
         // TODO
         unimplemented!();
     }
 
     // TODO decide whether to use builder pattern or what
-    pub fn counter(self, event: Event) -> Self {
-        // TODO
+    pub fn add_event_counter(&mut self, event: Event) -> Result<(), Errno> {
+        let raw = event.as_raw();
+
+        let pid = match self.pid {
+            PidConfig::Current => -1,
+            PidConfig::Other(p) => p,
+        };
+
+        let cpu = match self.cpu {
+            CpuConfig::All => -1,
+            CpuConfig::Specific(c) => c,
+        };
+
+        let group_fd = match self.group_fd {
+            Some(f) => f,
+            None => -1,
+        };
+
+        perf_event_open(&raw, pid, cpu, group_fd, flags)?;
+        Ok(())
+    }
+
+    pub fn start(self) -> Result<Counts, String> {
+        // TODO ioctl enable
         unimplemented!();
     }
+}
+
+pub enum PidConfig {
+    Current,
+    Other(pid_t),
+}
+
+pub enum CpuConfig {
+    All,
+    Specific(c_int),
 }
 
 fn perf_event_open(
@@ -41,7 +92,7 @@ fn perf_event_open(
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 enum Event {
     Hardware(hw::Event),
     Software(sw::Event),
@@ -49,6 +100,11 @@ enum Event {
 }
 
 impl Event {
+    pub fn available(&self) -> Result<(), ()> {
+        // TODO
+        unimplemented!();
+    }
+
     fn type_(&self) -> raw::perf_type_id {
         use raw::perf_type_id::*;
         match *self {
@@ -67,10 +123,12 @@ impl Event {
             }
         }
     }
+
+    fn as_raw(&self) -> raw::perf_event_attr {}
 }
 
 pub mod sw {
-    #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+    #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
     pub enum Event {
         CpuClock,
         TaskClock,
@@ -105,7 +163,7 @@ pub mod sw {
 }
 pub mod hw {
 
-    #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+    #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
     pub enum Event {
         CpuCycles,
         Instructions,
@@ -141,7 +199,7 @@ pub mod hw {
     }
 
     pub mod cache {
-        #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+        #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
         pub enum Id {
             Level1Data,
             Level1Instruction,
@@ -170,7 +228,7 @@ pub mod hw {
             }
         }
 
-        #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+        #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
         pub enum OpId {
             Read,
             Write,
@@ -190,7 +248,7 @@ pub mod hw {
             }
         }
 
-        #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+        #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
         pub enum OpResultId {
             Access,
             Miss,
