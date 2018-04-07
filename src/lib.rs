@@ -38,7 +38,7 @@ impl Counts {
     pub fn start_all_available() -> Result<Self, ()> {
         let res = Counts::new(PidConfig::Current, CpuConfig::All)
             .all_available()
-            .init();
+            .create();
 
         if let (_, Err(ref failures)) = res {
             for (event, error) in failures {
@@ -73,7 +73,7 @@ impl CountsBuilder {
         self
     }
 
-    pub fn init(self) -> (Result<Counts, ()>, Result<(), BTreeMap<Event, OpenError>>) {
+    pub fn create(self) -> (Result<Counts, ()>, Result<(), BTreeMap<Event, OpenError>>) {
         let mut counters = Vec::new();
         let mut failures = BTreeMap::new();
 
@@ -465,5 +465,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_one_shot() {}
+    fn test_one_shot() {
+        let mut counts = Counts::start_all_available().unwrap();
+    }
 }
