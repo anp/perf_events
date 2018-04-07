@@ -6,6 +6,8 @@ license = "MIT"
 
 [dependencies]
 errno = "0.2"
+failure = "0.1"
+failure_derive = "0.1"
 libc = "0.2"
 
 [build-dependencies]
