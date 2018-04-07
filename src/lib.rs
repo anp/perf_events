@@ -6,18 +6,22 @@ extern crate libc;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{FromRawFd, RawFd};
 
 use errno::{errno, Errno};
 use libc::{c_int, pid_t, syscall, SYS_perf_event_open};
 
-pub struct Counts {}
+pub struct Counts {
+    counters: Vec<EventCounter>,
+}
 
 impl Counts {
     pub fn new(pid: PidConfig, cpu: CpuConfig) -> CountsBuilder {
-        // TODO
-        unimplemented!();
+        CountsBuilder {
+            pid,
+            cpu,
+            to_count: BTreeSet::new(),
+        }
     }
 
     // TODO ioctl enable
@@ -26,7 +30,6 @@ impl Counts {
 pub struct CountsBuilder {
     pid: PidConfig,
     cpu: CpuConfig,
-    counting: bool,
     to_count: BTreeSet<Event>,
 }
 
@@ -42,10 +45,35 @@ impl CountsBuilder {
     }
 
     pub fn init(self) -> (Result<Counts, ()>, Result<(), BTreeMap<Event, Errno>>) {
-        unimplemented!();
+        let mut counters = Vec::new();
+        let mut failures = BTreeMap::new();
+
+        for event in self.to_count {
+            match EventCounter::new(event, self.pid, self.cpu) {
+                Ok(c) => counters.push(c),
+                Err(why) => {
+                    failures.insert(event, why);
+                }
+            };
+        }
+
+        let ret_counts = if counters.len() == 0 {
+            Err(())
+        } else {
+            Ok(Counts { counters })
+        };
+
+        let ret_failures = if failures.len() == 0 {
+            Ok(())
+        } else {
+            Err(failures)
+        };
+
+        (ret_counts, ret_failures)
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum PidConfig {
     Current,
     Other(pid_t),
@@ -60,6 +88,7 @@ impl PidConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum CpuConfig {
     All,
     Specific(c_int),
@@ -74,9 +103,17 @@ impl CpuConfig {
     }
 }
 
+#[derive(Debug)]
 struct EventCounter {
     event: Event,
     file: File,
+}
+
+impl EventCounter {
+    fn new(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<Self, Errno> {
+        let file = unsafe { File::from_raw_fd(event.create_fd(pid, cpu)?) };
+        Ok(Self { event, file })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -87,13 +124,13 @@ pub enum Event {
 }
 
 impl Event {
-    fn create_fd(&self, pid: pid_t, cpu: c_int) -> Result<RawFd, Errno> {
+    fn create_fd(&self, pid: PidConfig, cpu: CpuConfig) -> Result<RawFd, Errno> {
         unsafe {
             match syscall(
                 SYS_perf_event_open,
                 &self.as_raw(true),
-                pid,
-                cpu,
+                pid.raw(),
+                cpu.raw(),
                 // ignore group_fd, since we can't set inherit *and* read multiple from a group
                 -1,
                 // NOTE: doesnt seem like this is needed for this library, but
