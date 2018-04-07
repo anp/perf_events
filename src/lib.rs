@@ -3,6 +3,9 @@ extern crate failure;
 #[macro_use]
 extern crate failure_derive;
 extern crate libc;
+extern crate strum;
+#[macro_use]
+extern crate strum_macros;
 
 // TODO logging
 
@@ -66,6 +69,7 @@ impl Counts {
     }
 }
 
+#[derive(Debug)]
 pub struct CountsBuilder {
     pid: PidConfig,
     cpu: CpuConfig,
@@ -73,8 +77,12 @@ pub struct CountsBuilder {
 }
 
 impl CountsBuilder {
-    pub fn all_available(self) -> Self {
-        unimplemented!();
+    pub fn all_available(mut self) -> Self {
+        for event in Event::all_events() {
+            self = self.event(event);
+        }
+
+        self
     }
 
     pub fn event(mut self, event: Event) -> Self {
