@@ -462,7 +462,7 @@ pub mod raw {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-#[derive(Fail)]
+#[derive(Debug, Fail)]
 pub enum PerfEventsError {
     #[fail(display = "Failed to open a perf_events file descriptor: {}", inner)]
     FdOpenError { inner: OpenError },
@@ -477,5 +477,15 @@ mod test {
     #[test]
     fn test_one_shot() {
         let mut counts = Counts::start_all_available().unwrap();
+        let before = counts.read();
+
+        println!("first:\n{:#?}", before);
+
+        for i in 0..10000 {
+            // noop
+        }
+
+        let after = counts.read();
+        println!("second:\n{:#?}", after);
     }
 }
