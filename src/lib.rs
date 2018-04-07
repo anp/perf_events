@@ -11,7 +11,7 @@ use std::io;
 use std::os::unix::io::RawFd;
 
 use errno::{errno, Errno};
-use libc::{c_int, pid_t, syscall, SYS_perf_event_open};
+use libc::{c_int, c_ulong, pid_t, syscall, SYS_perf_event_open};
 
 pub struct Counts {}
 
@@ -31,6 +31,7 @@ pub struct CountsBuilder {
     cpu: CpuConfig,
     counting: bool,
     group_fd: Option<RawFd>,
+    flags: Flags,
 }
 
 impl CountsBuilder {
@@ -53,7 +54,7 @@ impl CountsBuilder {
             self.pid.raw(),
             self.cpu.raw(),
             group_fd,
-            0//self.flags.bits,
+            self.flags.bits,
         )?;
 
         self.group_fd = Some(ret_fd);
@@ -95,19 +96,21 @@ impl CpuConfig {
     }
 }
 
-// bitflags! {
-//     struct FdFlags: u64 {
-//        use raw::
-//        const FD_CLOEXEC =
-//     }
-// }
+bitflags! {
+    struct Flags: c_ulong {
+       const FD_CLOEXEC = raw::PERF_FLAG_FD_CLOEXEC as c_ulong;
+       const FD_NO_GROUP = raw::PERF_FLAG_FD_NO_GROUP as c_ulong;
+       const FD_OUTPUT = raw::PERF_FLAG_FD_OUTPUT as c_ulong;
+       const PID_CGROUP = raw::PERF_FLAG_PID_CGROUP as c_ulong;
+    }
+}
 
 fn perf_event_open(
     attr: *const raw::perf_event_attr,
     pid: pid_t,
     cpu: c_int,
     group_fd: c_int,
-    flags: u64,
+    flags: c_ulong,
 ) -> Result<RawFd, Errno> {
     unsafe {
         match syscall(SYS_perf_event_open, attr, pid, cpu, group_fd, flags) {
