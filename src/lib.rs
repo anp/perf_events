@@ -1,5 +1,3 @@
-#[macro_use]
-extern crate bitflags;
 extern crate errno;
 extern crate libc;
 
@@ -11,7 +9,7 @@ use std::io;
 use std::os::unix::io::RawFd;
 
 use errno::{errno, Errno};
-use libc::{c_int, c_ulong, pid_t, syscall, SYS_perf_event_open};
+use libc::{c_int, pid_t, syscall, SYS_perf_event_open};
 
 pub struct Counts {}
 
@@ -31,7 +29,6 @@ pub struct CountsBuilder {
     cpu: CpuConfig,
     counting: bool,
     group_fd: Option<RawFd>,
-    flags: Flags,
 }
 
 impl CountsBuilder {
@@ -54,7 +51,13 @@ impl CountsBuilder {
             self.pid.raw(),
             self.cpu.raw(),
             group_fd,
-            self.flags.bits,
+            // NOTE: doesnt seem like this is needed for this library, but
+            // i could be wrong. CLOEXEC doesn't seem to apply when we won't
+            // leak the file descriptor, NO_GROUP doesn't make since FD_OUTPUT
+            // has been broken since 2.6.35, and PID_CGROUP isn't useful
+            // unless you're running inside containers, which i don't need to
+            // support yet
+            0,
         )?;
 
         self.group_fd = Some(ret_fd);
@@ -96,21 +99,12 @@ impl CpuConfig {
     }
 }
 
-bitflags! {
-    struct Flags: c_ulong {
-       const FD_CLOEXEC = raw::PERF_FLAG_FD_CLOEXEC as c_ulong;
-       const FD_NO_GROUP = raw::PERF_FLAG_FD_NO_GROUP as c_ulong;
-       const FD_OUTPUT = raw::PERF_FLAG_FD_OUTPUT as c_ulong;
-       const PID_CGROUP = raw::PERF_FLAG_PID_CGROUP as c_ulong;
-    }
-}
-
 fn perf_event_open(
     attr: *const raw::perf_event_attr,
     pid: pid_t,
     cpu: c_int,
     group_fd: c_int,
-    flags: c_ulong,
+    flags: u64,
 ) -> Result<RawFd, Errno> {
     unsafe {
         match syscall(SYS_perf_event_open, attr, pid, cpu, group_fd, flags) {
