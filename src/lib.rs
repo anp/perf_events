@@ -4,7 +4,8 @@ extern crate libc;
 // TODO logging
 // TODO better error handling
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::io;
 use std::os::unix::io::RawFd;
 
@@ -19,54 +20,28 @@ impl Counts {
         unimplemented!();
     }
 
-    pub fn read(&mut self) -> io::Result<BTreeMap<EventCounter, u64>> {
-        unimplemented!();
-    }
+    // TODO ioctl enable
 }
 
 pub struct CountsBuilder {
     pid: PidConfig,
     cpu: CpuConfig,
     counting: bool,
-    group_fd: Option<RawFd>,
+    to_count: BTreeSet<Event>,
 }
 
 impl CountsBuilder {
-    pub fn count_all_available(self) {
+    pub fn all_available(self) {
         // TODO
         unimplemented!();
     }
 
-    // TODO decide whether to use builder pattern or what
-    pub fn add_event_counter(mut self, event: EventCounter) -> Result<(), Errno> {
-        let raw = event.as_raw();
-
-        let group_fd = match self.group_fd {
-            Some(f) => f,
-            None => -1,
-        };
-
-        let ret_fd = perf_event_open(
-            &raw,
-            self.pid.raw(),
-            self.cpu.raw(),
-            group_fd,
-            // NOTE: doesnt seem like this is needed for this library, but
-            // i could be wrong. CLOEXEC doesn't seem to apply when we won't
-            // leak the file descriptor, NO_GROUP doesn't make since FD_OUTPUT
-            // has been broken since 2.6.35, and PID_CGROUP isn't useful
-            // unless you're running inside containers, which i don't need to
-            // support yet
-            0,
-        )?;
-
-        self.group_fd = Some(ret_fd);
-
-        Ok(())
+    pub fn event(mut self, event: Event) -> Self {
+        self.to_count.insert(event);
+        self
     }
 
-    pub fn start(self) -> Result<Counts, String> {
-        // TODO ioctl enable
+    pub fn init(self) -> (Result<Counts, ()>, Result<(), BTreeMap<Event, Errno>>) {
         unimplemented!();
     }
 }
@@ -99,55 +74,78 @@ impl CpuConfig {
     }
 }
 
-fn perf_event_open(
-    attr: *const raw::perf_event_attr,
-    pid: pid_t,
-    cpu: c_int,
-    group_fd: c_int,
-    flags: u64,
-) -> Result<RawFd, Errno> {
-    unsafe {
-        match syscall(SYS_perf_event_open, attr, pid, cpu, group_fd, flags) {
-            -1 => Err(errno()),
-            fd => Ok(fd as RawFd),
-        }
-    }
+struct EventCounter {
+    event: Event,
+    file: File,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum EventCounter {
+pub enum Event {
     Hardware(HwEvent),
     Software(SwEvent),
     HardwareCache(CacheId, CacheOpId, CacheOpResultId),
 }
 
-impl EventCounter {
-    pub fn available(&self) -> Result<(), ()> {
-        // TODO
-        unimplemented!();
+impl Event {
+    fn create_fd(&self, pid: pid_t, cpu: c_int) -> Result<RawFd, Errno> {
+        unsafe {
+            match syscall(
+                SYS_perf_event_open,
+                &self.as_raw(true),
+                pid,
+                cpu,
+                // ignore group_fd, since we can't set inherit *and* read multiple from a group
+                -1,
+                // NOTE: doesnt seem like this is needed for this library, but
+                // i could be wrong. CLOEXEC doesn't seem to apply when we won't
+                // leak the file descriptor, NO_GROUP doesn't make since FD_OUTPUT
+                // has been broken since 2.6.35, and PID_CGROUP isn't useful
+                // unless you're running inside containers, which i don't need to
+                // support yet
+                0,
+            ) {
+                -1 => Err(errno()),
+                fd => Ok(fd as RawFd),
+            }
+        }
     }
 
     fn type_(&self) -> raw::perf_type_id {
         use raw::perf_type_id::*;
         match *self {
-            EventCounter::Hardware(_) => PERF_TYPE_HARDWARE,
-            EventCounter::Software(_) => PERF_TYPE_SOFTWARE,
-            EventCounter::HardwareCache(_, _, _) => PERF_TYPE_HW_CACHE,
+            Event::Hardware(_) => PERF_TYPE_HARDWARE,
+            Event::Software(_) => PERF_TYPE_SOFTWARE,
+            Event::HardwareCache(_, _, _) => PERF_TYPE_HW_CACHE,
         }
     }
 
     fn config(&self) -> u64 {
         match *self {
-            EventCounter::Hardware(hw_id) => hw_id.config(),
-            EventCounter::Software(sw_id) => sw_id.config(),
-            EventCounter::HardwareCache(id, op_id, op_result_id) => {
+            Event::Hardware(hw_id) => hw_id.config(),
+            Event::Software(sw_id) => sw_id.config(),
+            Event::HardwareCache(id, op_id, op_result_id) => {
                 id.mask() | (op_id.mask() << 8) | (op_result_id.mask() << 16)
             }
         }
     }
 
-    fn as_raw(&self) -> raw::perf_event_attr {
-        unimplemented!();
+    fn as_raw(&self, disabled: bool) -> raw::perf_event_attr {
+        let mut raw_event: raw::perf_event_attr = unsafe { std::mem::zeroed() };
+
+        raw_event.type_ = self.type_() as u32;
+        raw_event.size = std::mem::size_of::<raw::perf_event_attr>() as u32;
+        raw_event.config = self.config();
+
+        // TODO decide whether to change the read format
+        if disabled {
+            raw_event.set_disabled(1);
+        }
+
+        // make sure any threads spawned after starting to count are included
+        raw_event.set_inherit(1);
+        // TODO maybe figure out what inherit_stat actually does?
+
+        raw_event
     }
 }
 
@@ -229,7 +227,7 @@ pub enum CacheId {
 }
 
 impl CacheId {
-    pub(crate) fn mask(&self) -> u64 {
+    fn mask(&self) -> u64 {
         use raw::perf_hw_cache_id::*;
         let mask = match *self {
             CacheId::Level1Data => PERF_COUNT_HW_CACHE_L1D,
@@ -253,7 +251,7 @@ pub enum CacheOpId {
 }
 
 impl CacheOpId {
-    pub(crate) fn mask(&self) -> u64 {
+    fn mask(&self) -> u64 {
         use raw::perf_hw_cache_op_id::*;
         let mask = match *self {
             CacheOpId::Read => PERF_COUNT_HW_CACHE_OP_READ,
@@ -271,7 +269,7 @@ pub enum CacheOpResultId {
 }
 
 impl CacheOpResultId {
-    pub(crate) fn mask(&self) -> u64 {
+    fn mask(&self) -> u64 {
         use raw::perf_hw_cache_op_result_id::*;
         let mask = match *self {
             CacheOpResultId::Access => PERF_COUNT_HW_CACHE_RESULT_ACCESS,
