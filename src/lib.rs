@@ -34,6 +34,26 @@ impl Counts {
     pub fn read(&mut self) -> Vec<(Event, u64)> {
         unimplemented!();
     }
+
+    pub fn start_all_available() -> Result<Self, ()> {
+        let res = Counts::new(PidConfig::Current, CpuConfig::All)
+            .all_available()
+            .init();
+
+        if let (_, Err(ref failures)) = res {
+            for (event, error) in failures {
+                // TODO log this
+            }
+        }
+
+        if let (Ok(mut counts), _) = res {
+            counts.start();
+            Ok(counts)
+        } else {
+            // TODO return error explaining that no counters were available
+            Err(())
+        }
+    }
 }
 
 pub struct CountsBuilder {
@@ -43,7 +63,7 @@ pub struct CountsBuilder {
 }
 
 impl CountsBuilder {
-    pub fn all_available(self) {
+    pub fn all_available(self) -> Self {
         // TODO
         unimplemented!();
     }
@@ -438,4 +458,12 @@ pub mod raw {
     #![allow(non_snake_case)]
 
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_one_shot() {}
 }
