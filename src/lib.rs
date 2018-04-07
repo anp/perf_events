@@ -16,6 +16,11 @@ use libc::{c_int, pid_t, syscall, SYS_perf_event_open};
 pub struct Counts {}
 
 impl Counts {
+    pub fn new(pid: PidConfig, cpu: CpuConfig) -> CountsBuilder {
+        // TODO
+        unimplemented!();
+    }
+
     pub fn read(&mut self) -> io::Result<BTreeMap<EventCounter, u64>> {
         unimplemented!();
     }
@@ -29,18 +34,13 @@ struct CountsBuilder {
 }
 
 impl CountsBuilder {
-    pub fn new(pid: PidConfig, cpu: CpuConfig) -> Self {
-        // TODO
-        unimplemented!();
-    }
-
-    pub fn count_all_available(&mut self) {
+    pub fn count_all_available(self) {
         // TODO
         unimplemented!();
     }
 
     // TODO decide whether to use builder pattern or what
-    pub fn add_event_counter(&mut self, event: EventCounter) -> Result<(), Errno> {
+    pub fn add_event_counter(self, event: EventCounter) -> Result<(), Errno> {
         let raw = event.as_raw();
 
         let group_fd = match self.group_fd {
