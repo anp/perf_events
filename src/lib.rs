@@ -26,7 +26,7 @@ impl Counts {
     }
 }
 
-struct CountsBuilder {
+pub struct CountsBuilder {
     pid: PidConfig,
     cpu: CpuConfig,
     counting: bool,
@@ -40,7 +40,7 @@ impl CountsBuilder {
     }
 
     // TODO decide whether to use builder pattern or what
-    pub fn add_event_counter(self, event: EventCounter) -> Result<(), Errno> {
+    pub fn add_event_counter(mut self, event: EventCounter) -> Result<(), Errno> {
         let raw = event.as_raw();
 
         let group_fd = match self.group_fd {
@@ -97,8 +97,8 @@ impl CpuConfig {
 
 // bitflags! {
 //     struct FdFlags: u64 {
-//         use raw::
-//         const FD_CLOEXEC =
+//        use raw::
+//        const FD_CLOEXEC =
 //     }
 // }
 
