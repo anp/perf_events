@@ -35,7 +35,7 @@ impl Counts {
         unimplemented!();
     }
 
-    pub fn start_all_available() -> Result<Self, ()> {
+    pub fn start_all_available() -> Result<Self, PerfEventsError> {
         let res = Counts::new(PidConfig::Current, CpuConfig::All)
             .all_available()
             .create();
@@ -51,7 +51,9 @@ impl Counts {
             Ok(counts)
         } else {
             // TODO return error explaining that no counters were available
-            Err(())
+            Err(PerfEventsError::StartError {
+                inner: String::from("No counters started successfully."),
+            })
         }
     }
 }
@@ -458,6 +460,14 @@ pub mod raw {
     #![allow(non_snake_case)]
 
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+#[derive(Fail)]
+pub enum PerfEventsError {
+    #[fail(display = "Failed to open a perf_events file descriptor: {}", inner)]
+    FdOpenError { inner: OpenError },
+    #[fail(display = "Failed to start collecting metrics: {}", inner)]
+    StartError { inner: String },
 }
 
 #[cfg(test)]
