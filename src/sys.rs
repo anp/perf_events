@@ -1,4 +1,8 @@
-use std::os::unix::io::RawFd;
+use std::fs::File;
+use std::io;
+use std::io::Read;
+use std::ops::{Deref, DerefMut};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use libc::{syscall, SYS_perf_event_open};
 use nix::errno::Errno;
@@ -6,7 +10,8 @@ use nix::errno::Errno;
 use super::{CpuConfig, PidConfig};
 use events::Event;
 
-pub fn create_fd(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<RawFd, OpenError> {
+pub fn create_fd(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<PerfEventFile, OpenError> {
+    // NOTE(unsafe) it'd be a kernel bug if this caused unsafety, i think
     unsafe {
         match syscall(
             SYS_perf_event_open,
@@ -24,7 +29,8 @@ pub fn create_fd(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<RawFd, 
             0,
         ) {
             -1 => Err(Errno::last().into()),
-            fd => Ok(fd as RawFd),
+            // NOTE(unsafe) if the kernel doesn't give -1, guarantees the fd is valid
+            fd => Ok(PerfEventFile(File::from_raw_fd(fd as i32))),
         }
     }
 }
@@ -146,3 +152,31 @@ ioctl!(
     PERF_EVENT_IOC_MAGIC,
     PERF_EVENT_IOC_ENABLE_MODE
 );
+
+#[derive(Debug)]
+pub struct PerfEventFile(File);
+
+impl Read for PerfEventFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl AsRawFd for PerfEventFile {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl Deref for PerfEventFile {
+    type Target = File;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PerfEventFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}

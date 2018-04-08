@@ -63,6 +63,8 @@ impl Event {
     }
 
     pub(crate) fn as_raw(&self, disabled: bool) -> perf_event_attr {
+        // NOTE(unsafe) a zeroed struct is what the example c code uses,
+        // zero fields are interpreted as "off" afaict, aside from the required fields
         let mut raw_event: perf_event_attr = unsafe { zeroed() };
 
         raw_event.type_ = self.type_() as u32;

@@ -21,7 +21,7 @@ pub(crate) mod sys;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use libc::{c_int, pid_t};
+use libc::pid_t;
 
 use counter::EventCounter;
 pub use error::PerfEventsError;
@@ -44,7 +44,7 @@ impl Counts {
         self.counters.iter().map(|c| c.enable()).collect()
     }
 
-    pub fn read(&mut self) -> Vec<(Event, u64)> {
+    pub fn read(&mut self) -> BTreeMap<Event, u64> {
         self.counters
             .iter_mut()
             .filter_map(|c| {
@@ -153,11 +153,11 @@ impl PidConfig {
 #[derive(Clone, Copy, Debug)]
 pub enum CpuConfig {
     All,
-    Specific(c_int),
+    Specific(i32),
 }
 
 impl CpuConfig {
-    fn raw(&self) -> c_int {
+    fn raw(&self) -> i32 {
         match *self {
             CpuConfig::All => -1,
             CpuConfig::Specific(c) => c,
