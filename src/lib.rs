@@ -1,10 +1,10 @@
-extern crate errno;
 extern crate failure;
 #[macro_use]
 extern crate failure_derive;
 extern crate libc;
 #[macro_use]
 extern crate log;
+extern crate nix;
 extern crate strum;
 #[macro_use]
 extern crate strum_macros;

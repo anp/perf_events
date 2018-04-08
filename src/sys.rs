@@ -1,8 +1,8 @@
 use std::os::unix::io::RawFd;
 
-use errno::{errno, Errno};
 use libc;
 use libc::{syscall, SYS_perf_event_open};
+use nix::errno::Errno;
 
 use super::{CpuConfig, PidConfig};
 use events::Event;
@@ -24,7 +24,7 @@ pub(crate) fn create_fd(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<
             // support yet
             0,
         ) {
-            -1 => Err(errno().into()),
+            -1 => Err(Errno::last().into()),
             fd => Ok(fd as RawFd),
         }
     }
@@ -116,22 +116,22 @@ pub enum OpenError {
 
 impl From<Errno> for OpenError {
     fn from(errno: Errno) -> OpenError {
-        match errno.0 {
-            libc::E2BIG => OpenError::AttrWrongSize,
-            libc::EACCES => OpenError::CapSysAdminRequired,
-            libc::EBADF => OpenError::InvalidFdOrPid,
-            libc::EBUSY => OpenError::PmuBusy,
-            libc::EFAULT => OpenError::AttrInvalidPointer,
-            libc::EINVAL => OpenError::InvalidEvent,
-            libc::EMFILE => OpenError::TooManyOpenFiles,
-            libc::ENODEV => OpenError::CpuFeatureUnsupported,
-            libc::ENOENT => OpenError::InvalidEventType,
-            libc::ENOSPC => OpenError::TooManyBreakpoints,
-            libc::ENOSYS => OpenError::UserStackSampleUnsupported,
-            libc::EOPNOTSUPP => OpenError::HardwareFeatureUnsupported,
-            libc::EOVERFLOW => OpenError::SampleMaxStackTooLarge,
-            libc::EPERM => OpenError::CapSysAdminRequiredOrExcludeUnsupported,
-            libc::ESRCH => OpenError::ProcessDoesNotExist,
+        match errno {
+            Errno::E2BIG => OpenError::AttrWrongSize,
+            Errno::EACCES => OpenError::CapSysAdminRequired,
+            Errno::EBADF => OpenError::InvalidFdOrPid,
+            Errno::EBUSY => OpenError::PmuBusy,
+            Errno::EFAULT => OpenError::AttrInvalidPointer,
+            Errno::EINVAL => OpenError::InvalidEvent,
+            Errno::EMFILE => OpenError::TooManyOpenFiles,
+            Errno::ENODEV => OpenError::CpuFeatureUnsupported,
+            Errno::ENOENT => OpenError::InvalidEventType,
+            Errno::ENOSPC => OpenError::TooManyBreakpoints,
+            Errno::ENOSYS => OpenError::UserStackSampleUnsupported,
+            Errno::EOPNOTSUPP => OpenError::HardwareFeatureUnsupported,
+            Errno::EOVERFLOW => OpenError::SampleMaxStackTooLarge,
+            Errno::EPERM => OpenError::CapSysAdminRequiredOrExcludeUnsupported,
+            Errno::ESRCH => OpenError::ProcessDoesNotExist,
             _ => OpenError::Unknown { errno },
         }
     }

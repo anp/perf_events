@@ -5,11 +5,11 @@ authors = ["Adam Perry <adam.n.perry@gmail.com>"]
 license = "MIT"
 
 [dependencies]
-errno = "0.2"
 failure = "0.1"
 failure_derive = "0.1"
 libc = "0.2"
 log = "0.4"
+nix = "0.10"
 strum = "0.9"
 strum_macros = "0.9"
 
