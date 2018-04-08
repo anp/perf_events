@@ -172,28 +172,28 @@ mod test {
 
     #[test]
     fn test_one_shot() {
-        let _ = env_logger::Builder::new()
+        let _ = env_logger::Builder::from_default_env()
             .filter(None, log::LevelFilter::Debug)
             .try_init();
 
         let mut counts = Counts::start_all_available().unwrap();
         let first = counts.read();
 
-        debug!("first:\n{:#?}", first);
+        trace!("first:\n{:#?}", first);
 
         for _ in 0..10000 {
             // noop
         }
 
         let second = counts.read();
-        debug!("second:\n{:#?}", second);
+        trace!("second:\n{:#?}", second);
 
         for _ in 0..10000 {
             // noop
         }
 
         let third = counts.read();
-        debug!("third:\n{:#?}", third);
+        trace!("third:\n{:#?}", third);
 
         assert_ne!(first, second);
         assert_ne!(second, third);
