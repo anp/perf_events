@@ -177,15 +177,26 @@ mod test {
             .try_init();
 
         let mut counts = Counts::start_all_available().unwrap();
-        let before = counts.read();
+        let first = counts.read();
 
-        debug!("first:\n{:#?}", before);
+        debug!("first:\n{:#?}", first);
 
         for _ in 0..10000 {
             // noop
         }
 
-        let after = counts.read();
-        debug!("second:\n{:#?}", after);
+        let second = counts.read();
+        debug!("second:\n{:#?}", second);
+
+        for _ in 0..10000 {
+            // noop
+        }
+
+        let third = counts.read();
+        debug!("third:\n{:#?}", third);
+
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+        assert_ne!(first, third);
     }
 }
