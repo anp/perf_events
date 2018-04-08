@@ -4,6 +4,7 @@ extern crate failure_derive;
 extern crate libc;
 #[macro_use]
 extern crate log;
+#[macro_use]
 extern crate nix;
 extern crate strum;
 #[macro_use]
@@ -12,18 +13,17 @@ extern crate strum_macros;
 #[cfg(test)]
 extern crate env_logger;
 
+pub(crate) mod counter;
 pub mod error;
 pub mod events;
 pub(crate) mod raw;
 pub(crate) mod sys;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io;
-use std::os::unix::io::FromRawFd;
 
 use libc::{c_int, pid_t};
 
+use counter::EventCounter;
 pub use error::PerfEventsError;
 use events::Event;
 
@@ -40,13 +40,21 @@ impl Counts {
         }
     }
 
-    pub fn start(&mut self) -> Vec<io::Result<()>> {
-        // TODO ioctl enable -- enable_on_exec?
-        unimplemented!();
+    pub fn start(&mut self) -> Vec<Result<(), PerfEventsError>> {
+        self.counters.iter().map(|c| c.enable()).collect()
     }
 
     pub fn read(&mut self) -> Vec<(Event, u64)> {
-        unimplemented!();
+        self.counters
+            .iter_mut()
+            .filter_map(|c| {
+                let res = c.read();
+                if let Err(ref why) = res {
+                    debug!("error reading counter: {}", why);
+                }
+                res.ok()
+            })
+            .collect()
     }
 
     pub fn start_all_available() -> Result<Self, PerfEventsError> {
@@ -56,7 +64,7 @@ impl Counts {
 
         if let (_, Err(ref failures)) = res {
             for (event, error) in failures {
-                debug!("error creating event {:?}: {}", event, error);
+                trace!("error creating event {:?}: {}", event, error);
             }
         }
 
@@ -127,19 +135,6 @@ impl CountsBuilder {
     }
 }
 
-#[derive(Debug)]
-struct EventCounter {
-    event: Event,
-    file: File,
-}
-
-impl EventCounter {
-    fn new(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<Self, sys::OpenError> {
-        let file = unsafe { File::from_raw_fd(sys::create_fd(event, pid, cpu)?) };
-        Ok(Self { event, file })
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum PidConfig {
     Current,
@@ -184,13 +179,13 @@ mod test {
         let mut counts = Counts::start_all_available().unwrap();
         let before = counts.read();
 
-        println!("first:\n{:#?}", before);
+        debug!("first:\n{:#?}", before);
 
         for _ in 0..10000 {
             // noop
         }
 
         let after = counts.read();
-        println!("second:\n{:#?}", after);
+        debug!("second:\n{:#?}", after);
     }
 }

@@ -1,6 +1,5 @@
 use std::os::unix::io::RawFd;
 
-use libc;
 use libc::{syscall, SYS_perf_event_open};
 use nix::errno::Errno;
 
@@ -136,3 +135,14 @@ impl From<Errno> for OpenError {
         }
     }
 }
+
+const PERF_EVENT_IOC_MAGIC: u8 = b'$';
+const PERF_EVENT_IOC_ENABLE_MODE: u8 = 0;
+
+ioctl!(
+    none
+    perf_event_ioc_enable
+    with
+    PERF_EVENT_IOC_MAGIC,
+    PERF_EVENT_IOC_ENABLE_MODE
+);
