@@ -7,7 +7,7 @@ use nix::errno::Errno;
 use super::{CpuConfig, PidConfig};
 use events::Event;
 
-pub(crate) fn create_fd(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<RawFd, OpenError> {
+pub fn create_fd(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<RawFd, OpenError> {
     unsafe {
         match syscall(
             SYS_perf_event_open,
