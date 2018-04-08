@@ -20,6 +20,8 @@ On Arch: https://wiki.archlinux.org/index.php/sysctl#Configuration.
 
 `echo 'kernel.perf_event_paranoid=0' | sudo tee /etc/sysctl.d/perf-event-permissive.conf`
 
+then reboot?
+
 # Building
 
 Currently relies on bindgen's buildscript setup, which depends on libclang.
