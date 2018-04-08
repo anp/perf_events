@@ -1,3 +1,4 @@
+use std::fmt::{Display, Error, Formatter};
 use std::mem::{size_of, zeroed};
 
 use strum::IntoEnumIterator;
@@ -84,6 +85,16 @@ impl Event {
     }
 }
 
+impl Display for Event {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        match *self {
+            Event::Hardware(hwe) => write!(f, "hw-{}", hwe),
+            Event::Software(swe) => write!(f, "sw-{}", swe),
+            Event::HardwareCache(id, op, result) => write!(f, "cache-{}-{}-{}", id, op, result),
+        }
+    }
+}
+
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq, PartialOrd, Ord)]
 pub enum SwEvent {
@@ -96,6 +107,23 @@ pub enum SwEvent {
     PageFaultsMajor = PERF_COUNT_SW_PAGE_FAULTS_MAJ as u64,
     AlignmentFaults = PERF_COUNT_SW_ALIGNMENT_FAULTS as u64,
     EmulationFaults = PERF_COUNT_SW_EMULATION_FAULTS as u64,
+}
+
+impl Display for SwEvent {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        let displayed = match *self {
+            SwEvent::CpuClock => "cpuclock",
+            SwEvent::TaskClock => "taskclock",
+            SwEvent::PageFaults => "pagefault",
+            SwEvent::ContextSwitches => "contextswitch",
+            SwEvent::CpuMigrations => "cpumigration",
+            SwEvent::PageFaultsMinor => "pagefaultminor",
+            SwEvent::PageFaultsMajor => "pagefaultmajor",
+            SwEvent::AlignmentFaults => "alignmentfault",
+            SwEvent::EmulationFaults => "emulationfault",
+        };
+        write!(f, "{}", displayed)
+    }
 }
 
 #[repr(u64)]
@@ -113,6 +141,24 @@ pub enum HwEvent {
     RefCpuCycles = PERF_COUNT_HW_REF_CPU_CYCLES as u64,
 }
 
+impl Display for HwEvent {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        let displayed = match *self {
+            HwEvent::CpuCycles => "cpucycles",
+            HwEvent::Instructions => "instructions",
+            HwEvent::CacheReferences => "cacheref",
+            HwEvent::CacheMisses => "cachemiss",
+            HwEvent::BranchInstructions => "branchinstructions",
+            HwEvent::BranchMisses => "branchmiss",
+            HwEvent::BusCycles => "buscycles",
+            HwEvent::StalledCyclesFrontend => "stalledcyclesfronted",
+            HwEvent::StalledCyclesBackend => "stalledcyclesbackend",
+            HwEvent::RefCpuCycles => "refcpucycles",
+        };
+        write!(f, "{}", displayed)
+    }
+}
+
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq, PartialOrd, Ord)]
 pub enum CacheId {
@@ -125,6 +171,21 @@ pub enum CacheId {
     Node = PERF_COUNT_HW_CACHE_NODE as u64,
 }
 
+impl Display for CacheId {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        let displayed = match *self {
+            CacheId::Level1Data => "l1d",
+            CacheId::Level1Instruction => "l1i",
+            CacheId::LastLevel => "ll",
+            CacheId::DataTLB => "dtlb",
+            CacheId::InstructionTLB => "itlb",
+            CacheId::BranchPredictionUnit => "bpu",
+            CacheId::Node => "node",
+        };
+        write!(f, "{}", displayed)
+    }
+}
+
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq, PartialOrd, Ord)]
 pub enum CacheOpId {
@@ -133,9 +194,30 @@ pub enum CacheOpId {
     Prefetch = PERF_COUNT_HW_CACHE_OP_PREFETCH as u64,
 }
 
+impl Display for CacheOpId {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        let displayed = match *self {
+            CacheOpId::Read => "read",
+            CacheOpId::Write => "write",
+            CacheOpId::Prefetch => "prefetch",
+        };
+        write!(f, "{}", displayed)
+    }
+}
+
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq, PartialOrd, Ord)]
 pub enum CacheOpResultId {
     Access = PERF_COUNT_HW_CACHE_RESULT_ACCESS as u64,
     Miss = PERF_COUNT_HW_CACHE_RESULT_MISS as u64,
+}
+
+impl Display for CacheOpResultId {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        let displayed = match *self {
+            CacheOpResultId::Access => "access",
+            CacheOpResultId::Miss => "miss",
+        };
+        write!(f, "{}", displayed)
+    }
 }
