@@ -19,3 +19,7 @@ Easiest fix is to set this to `0` or `-1`. This crate currently doesn't expose a
 On Arch: https://wiki.archlinux.org/index.php/sysctl#Configuration.
 
 `echo 'kernel.perf_event_paranoid=0' | sudo tee /etc/sysctl.d/perf-event-permissive.conf`
+
+# Building
+
+Currently relies on bindgen's buildscript setup, which depends on libclang.
