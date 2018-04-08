@@ -203,11 +203,9 @@ mod test {
         let second_events = second.iter().map(|e| e.0.to_string()).collect::<Vec<_>>();
         let third_events = third.iter().map(|e| e.0.to_string()).collect::<Vec<_>>();
 
-        trace!("first {:#?}", first_events);
-        trace!("second {:#?}", second_events);
-        trace!("third {:#?}", third_events);
-
         assert_eq!(first_events, second_events);
         assert_eq!(second_events, third_events);
+
+        debug!("events collected: {:#?}", first_events);
     }
 }
