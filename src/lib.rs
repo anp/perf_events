@@ -149,7 +149,7 @@ pub enum PidConfig {
 impl PidConfig {
     fn raw(&self) -> pid_t {
         match *self {
-            PidConfig::Current => -1,
+            PidConfig::Current => 0,
             PidConfig::Other(p) => p,
         }
     }
