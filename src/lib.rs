@@ -3,11 +3,14 @@ extern crate failure;
 #[macro_use]
 extern crate failure_derive;
 extern crate libc;
+#[macro_use]
+extern crate log;
 extern crate strum;
 #[macro_use]
 extern crate strum_macros;
 
-// TODO logging
+#[cfg(test)]
+extern crate env_logger;
 
 pub mod error;
 pub mod events;
@@ -53,7 +56,7 @@ impl Counts {
 
         if let (_, Err(ref failures)) = res {
             for (event, error) in failures {
-                // TODO log this
+                debug!("error creating event {:?}: {}", event, error);
             }
         }
 
@@ -170,9 +173,14 @@ impl CpuConfig {
 #[cfg(test)]
 mod test {
     use super::*;
+    use env_logger;
 
     #[test]
     fn test_one_shot() {
+        let _ = env_logger::Builder::new()
+            .filter(None, log::LevelFilter::Debug)
+            .try_init();
+
         let mut counts = Counts::start_all_available().unwrap();
         let before = counts.read();
 
