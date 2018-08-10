@@ -30,7 +30,7 @@ pub fn create_fd(event: Event, pid: PidConfig, cpu: CpuConfig) -> Result<PerfEve
         ) {
             -1 => Err(Errno::last().into()),
             // NOTE(unsafe) if the kernel doesn't give -1, guarantees the fd is valid
-            fd => Ok(PerfEventFile(File::from_raw_fd(fd as i32))),
+            fd => Ok(PerfEventFile(File::from_raw_fd(fd as i32), event)),
         }
     }
 }
@@ -184,7 +184,7 @@ ioctl!(
 );
 
 #[derive(Debug)]
-pub struct PerfEventFile(pub(crate) File);
+pub struct PerfEventFile(pub(crate) File, pub(crate) Event);
 
 impl Read for PerfEventFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
