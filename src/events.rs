@@ -79,6 +79,10 @@ impl Event {
         raw_event.size = size_of::<perf_event_attr>() as u32;
         raw_event.config = self.config();
 
+        // from the linux manpage example
+        raw_event.set_exclude_kernel(1);
+        raw_event.set_exclude_hv(1);
+
         // TODO decide whether to change the read format
         if disabled {
             raw_event.set_disabled(1);
