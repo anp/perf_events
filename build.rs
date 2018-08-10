@@ -4,18 +4,7 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let mut bindings = bindgen::Builder::default()
-        .header("wrapper.h")
-        .whitelisted_type("perf_type_id")
-        .whitelisted_type("perf_hw_id")
-        .whitelisted_type("perf_hw_cache_id")
-        .whitelisted_type("perf_hw_cache_op_id")
-        .whitelisted_type("perf_hw_cache_op_result_id")
-        .whitelisted_type("perf_sw_ids")
-        .whitelisted_type("perf_event_attr")
-        .whitelisted_type("perf_event_header")
-        .whitelisted_var("PERF_EVENT_IOC_ENABLE")
-        .whitelisted_var("PERF_EVENT_IOC_RESET");
+    let mut bindings = bindgen::Builder::default().header("wrapper.h");
 
     if std::env::var("TARGET").unwrap().find("linux").is_none() {
         bindings = bindings.clang_arg("-Ilinux-headers");
