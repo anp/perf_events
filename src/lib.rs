@@ -1,3 +1,7 @@
+// TODO The official way of knowing if perf_event_open() support is enabled
+//    is checking for the existence of the file
+//    /proc/sys/kernel/perf_event_paranoid.
+
 extern crate failure;
 #[macro_use]
 extern crate failure_derive;
