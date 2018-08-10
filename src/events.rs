@@ -21,7 +21,7 @@ pub enum Event {
 }
 
 impl Event {
-    pub(crate) fn all_events() -> Vec<Event> {
+    pub(crate) fn all_events() -> Vec<Self> {
         let mut variants = Vec::new();
 
         for hw_event in HwEvent::iter() {
@@ -29,6 +29,11 @@ impl Event {
         }
 
         for sw_event in SwEvent::iter() {
+            // this can be specially requested
+            if sw_event == SwEvent::DummyForSampled {
+                continue;
+            }
+
             variants.push(Event::Software(sw_event));
         }
 
@@ -157,6 +162,15 @@ pub enum SwEvent {
     #[serde(rename = "emulation-faults")]
     #[strum(to_string = "Emulation Faults")]
     EmulationFaults = PERF_COUNT_SW_EMULATION_FAULTS as u64,
+
+    /// This is a placeholder event that counts nothing. Informational sample record types such as
+    /// mmap or comm must be associated with an active event. This dummy event allows gathering such
+    /// records without requiring a counting event.
+    ///
+    /// (since Linux 3.12)
+    #[serde(rename = "dummy")]
+    #[strum(to_string = "Dummy (for sampled metrics)")]
+    DummyForSampled = PERF_COUNT_SW_DUMMY as u64,
 }
 
 #[repr(u64)]
