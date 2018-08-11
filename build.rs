@@ -4,7 +4,11 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let mut bindings = bindgen::Builder::default().header("wrapper.h");
+    let mut bindings = bindgen::Builder::default()
+        .header("wrapper.h")
+        .rust_target(bindgen::RustTarget::Stable_1_25)
+        .constified_enum_module("*")
+        .rustfmt_bindings(true);
 
     if std::env::var("TARGET").unwrap().find("linux").is_none() {
         bindings = bindings.clang_arg("-Ilinux-headers");

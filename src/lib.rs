@@ -2,20 +2,27 @@
 //    is checking for the existence of the file
 //    /proc/sys/kernel/perf_event_paranoid.
 
+#[macro_use]
+extern crate bitflags;
+#[macro_use]
 extern crate failure;
 #[macro_use]
 extern crate failure_derive;
-extern crate libc;
 #[macro_use]
 extern crate log;
 #[macro_use]
 extern crate nix;
-extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate strum;
 #[macro_use]
 extern crate strum_macros;
+
+extern crate libc;
+extern crate mio;
+extern crate mmap;
+extern crate page_size;
+extern crate serde;
+extern crate strum;
 
 #[cfg(test)]
 extern crate env_logger;
@@ -31,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use libc::pid_t;
 
 use counter::EventCounter;
-pub use error::PerfEventsError;
+pub use error::*;
 use events::Event;
 
 pub struct Counts {
@@ -47,7 +54,7 @@ impl Counts {
         }
     }
 
-    pub fn start(&mut self) -> Vec<Result<(), PerfEventsError>> {
+    pub fn start(&mut self) -> Vec<Result<()>> {
         self.counters.iter().map(|c| c.enable()).collect()
     }
 
@@ -64,7 +71,7 @@ impl Counts {
             .collect()
     }
 
-    pub fn start_all_available() -> Result<Self, PerfEventsError> {
+    pub fn start_all_available() -> Result<Self> {
         let res = Counts::new(PidConfig::Current, CpuConfig::All)
             .all_available()
             .create();
@@ -80,7 +87,7 @@ impl Counts {
             Ok(counts)
         } else {
             // TODO return error explaining that no counters were available
-            Err(PerfEventsError::StartError {
+            Err(Error::Start {
                 inner: String::from("No counters started successfully."),
             })
         }
@@ -96,7 +103,7 @@ pub struct CountsBuilder {
 
 impl CountsBuilder {
     pub fn all_available(mut self) -> Self {
-        for event in Event::all_events() {
+        for event in Event::all_counted_events() {
             self = self.event(event);
         }
 
@@ -111,8 +118,8 @@ impl CountsBuilder {
     pub fn create(
         self,
     ) -> (
-        Result<Counts, ()>,
-        Result<(), BTreeMap<Event, sys::OpenError>>,
+        ::std::result::Result<Counts, ()>,
+        ::std::result::Result<(), BTreeMap<Event, Error>>,
     ) {
         let mut counters = Vec::new();
         let mut failures = BTreeMap::new();
