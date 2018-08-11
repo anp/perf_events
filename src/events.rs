@@ -447,14 +447,15 @@ impl SamplingRate {
 // Prior to Linux 3.0, setting wakeup_events to 0 resulted in no
 // overflow notifications; more recent kernels treat 0 the same
 // as 1.
+
+//           This union sets how many samples (wakeup_events) or bytes
+//           (wakeup_watermark) happen before an overflow notification hap‐
+//           pens.  Which one is used is selected by the watermark bit
+//           flag.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize)]
 pub enum WakeupConfig {
     NumSamples(u32),
     WatermarkBytes(u32),
-    //           This union sets how many samples (wakeup_events) or bytes
-    //           (wakeup_watermark) happen before an overflow notification hap‐
-    //           pens.  Which one is used is selected by the watermark bit
-    //           flag.
 }
 
 impl WakeupConfig {
@@ -473,19 +474,33 @@ impl WakeupConfig {
     }
 }
 
-// IP
-// ADDR
-// READ
-// CALLCHAIN
-// PERIOD
-// RAW
-// BRANCH_STACK
-// REGS_USER
-// STACK_USER
-// WEIGHT
-// DATA_SRC
-// TRANSACTION
-// REGS_INTR
+pub mod sampled {
+    use super::*;
+    macro_rules! sampled_spec {
+        ($struct_name:ident, $flag:ident) => {
+            pub struct $struct_name;
+
+            impl SampleThingy for $struct_name {
+                const FLAGS: SamplingType = SamplingType::$flag;
+            }
+        };
+    }
+
+    sampled_spec!(InstructionPointer, IP);
+    sampled_spec!(Address, ADDR);
+    sampled_spec!(Read, READ);
+    sampled_spec!(Callchain, CALLCHAIN);
+    sampled_spec!(Period, PERIOD);
+    sampled_spec!(Raw, RAW);
+    sampled_spec!(BranchStack, BRANCH_STACK);
+    sampled_spec!(RegistersUser, REGS_USER);
+    sampled_spec!(StackUser, STACK_USER);
+    sampled_spec!(Weight, WEIGHT);
+    sampled_spec!(DataSource, DATA_SRC);
+    sampled_spec!(Transaction, TRANSACTION);
+    sampled_spec!(RegistersIntr, REGS_INTR);
+
+}
 
 pub trait SampleThingy {
     const FLAGS: SamplingType;
