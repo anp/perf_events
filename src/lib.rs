@@ -5,6 +5,8 @@
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
+extern crate enum_primitive;
+#[macro_use]
 extern crate failure;
 #[macro_use]
 extern crate failure_derive;
@@ -17,37 +19,39 @@ extern crate serde_derive;
 #[macro_use]
 extern crate strum_macros;
 
+extern crate futures;
 extern crate libc;
 extern crate mio;
 extern crate mmap;
+extern crate num;
 extern crate page_size;
 extern crate serde;
 extern crate strum;
+extern crate tokio;
 
 #[cfg(test)]
 extern crate env_logger;
 
-pub(crate) mod counter;
+pub(crate) mod count;
 pub mod error;
-pub mod events;
+pub(crate) mod fd;
 pub(crate) mod raw;
-pub(crate) mod sys;
+pub mod sample;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use libc::pid_t;
 
-use counter::EventCounter;
+use count::{Counted, Counter};
 pub use error::*;
-use events::Event;
 
-pub struct Counts {
-    counters: Vec<EventCounter>,
+pub struct Perf {
+    counters: Vec<Counter>,
 }
 
-impl Counts {
-    pub fn new(pid: PidConfig, cpu: CpuConfig) -> CountsBuilder {
-        CountsBuilder {
+impl Perf {
+    pub fn new(pid: PidConfig, cpu: CpuConfig) -> PerfBuilder {
+        PerfBuilder {
             pid,
             cpu,
             to_count: BTreeSet::new(),
@@ -58,7 +62,7 @@ impl Counts {
         self.counters.iter().map(|c| c.enable()).collect()
     }
 
-    pub fn read(&mut self) -> BTreeMap<Event, u64> {
+    pub fn read(&mut self) -> BTreeMap<Counted, u64> {
         self.counters
             .iter_mut()
             .filter_map(|c| {
@@ -71,9 +75,9 @@ impl Counts {
             .collect()
     }
 
-    pub fn start_all_available() -> Result<Self> {
-        let res = Counts::new(PidConfig::Current, CpuConfig::All)
-            .all_available()
+    pub fn start_all_counts_available() -> Result<Self> {
+        let res = Perf::new(PidConfig::Current, CpuConfig::All)
+            .all_counts_available()
             .create();
 
         if let (_, Err(ref failures)) = res {
@@ -95,22 +99,22 @@ impl Counts {
 }
 
 #[derive(Debug)]
-pub struct CountsBuilder {
+pub struct PerfBuilder {
     pid: PidConfig,
     cpu: CpuConfig,
-    to_count: BTreeSet<Event>,
+    to_count: BTreeSet<Counted>,
 }
 
-impl CountsBuilder {
-    pub fn all_available(mut self) -> Self {
-        for event in Event::all_counted_events() {
-            self = self.event(event);
+impl PerfBuilder {
+    pub fn all_counts_available(mut self) -> Self {
+        for event in Counted::all() {
+            self = self.count(event);
         }
 
         self
     }
 
-    pub fn event(mut self, event: Event) -> Self {
+    pub fn count(mut self, event: Counted) -> Self {
         self.to_count.insert(event);
         self
     }
@@ -118,14 +122,14 @@ impl CountsBuilder {
     pub fn create(
         self,
     ) -> (
-        ::std::result::Result<Counts, ()>,
-        ::std::result::Result<(), BTreeMap<Event, Error>>,
+        ::std::result::Result<Perf, ()>,
+        ::std::result::Result<(), BTreeMap<Counted, Error>>,
     ) {
         let mut counters = Vec::new();
         let mut failures = BTreeMap::new();
 
         for event in self.to_count {
-            match EventCounter::new(event, self.pid, self.cpu) {
+            match Counter::new(event.clone(), self.pid, self.cpu) {
                 Ok(c) => counters.push(c),
                 Err(why) => {
                     failures.insert(event, why);
@@ -136,7 +140,7 @@ impl CountsBuilder {
         let ret_counts = if counters.len() == 0 {
             Err(())
         } else {
-            Ok(Counts { counters })
+            Ok(Perf { counters })
         };
 
         let ret_failures = if failures.len() == 0 {
@@ -190,7 +194,7 @@ mod test {
             .filter(None, log::LevelFilter::Debug)
             .try_init();
 
-        let mut counts = Counts::start_all_available().unwrap();
+        let mut counts = Perf::start_all_counts_available().unwrap();
         let first = counts.read();
 
         trace!("first:\n{:#?}", first);

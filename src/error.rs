@@ -2,7 +2,7 @@ use failure;
 use mmap;
 use nix;
 
-use sys::OpenError;
+use fd::OpenError;
 
 pub type Result<T> = ::std::result::Result<T, Error>;
 
