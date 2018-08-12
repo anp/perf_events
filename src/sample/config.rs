@@ -40,6 +40,22 @@ pub struct SamplingConfig {
     //           callchain.
 }
 
+impl ::std::default::Default for SamplingConfig {
+    fn default() -> Self {
+        SamplingConfig {
+            requests: vec![
+                SampleRequest::Callchain,
+                SampleRequest::InstructionPointer,
+                SampleRequest::Weight,
+                SampleRequest::DataSource,
+            ],
+            rate: SamplingRate::Frequency(1000),
+            wakeup: WakeupConfig::WatermarkBytes(4_000_000),
+            sample_id_all: true,
+        }
+    }
+}
+
 impl PerfEventAttrThingy for SamplingConfig {
     fn apply(&self, attr: &mut perf_event_attr) {
         attr.type_ = ::raw::perf_type_id::PERF_TYPE_SOFTWARE;

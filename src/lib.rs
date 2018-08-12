@@ -19,6 +19,7 @@ extern crate serde_derive;
 #[macro_use]
 extern crate strum_macros;
 
+extern crate bytes;
 extern crate futures;
 extern crate libc;
 extern crate mio;
@@ -192,7 +193,7 @@ mod test {
     #[test]
     fn test_one_shot() {
         let _ = env_logger::Builder::from_default_env()
-            .filter(None, log::LevelFilter::Debug)
+            .filter(None, log::LevelFilter::Info)
             .try_init();
 
         let mut counts = Perf::start_all_counts_available().unwrap();

@@ -66,7 +66,7 @@ impl PerfFile {
 
             if res == -1 {
                 let e = Error::from(OpenError::from(Errno::last()));
-                warn!("unable to open {:?}: {:?}", a, e);
+                debug!("unable to open {:?}: {:?}", a, e);
                 Err(e)
             } else {
                 // NOTE(unsafe) if the kernel doesn't give -1, guarantees the fd is valid
