@@ -28,6 +28,7 @@ extern crate page_size;
 extern crate serde;
 extern crate strum;
 extern crate tokio;
+extern crate tokio_codec;
 
 #[cfg(test)]
 extern crate env_logger;

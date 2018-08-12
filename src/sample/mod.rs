@@ -1,15 +1,17 @@
 pub mod config;
+mod decoder;
 mod ring_buffer;
 
+use std::sync::mpsc::*;
 use std::thread::{spawn, JoinHandle};
 
-use self::{config::SamplingConfig, ring_buffer::RingBuffer};
+use num::FromPrimitive;
+use tokio::prelude::*;
+
+use self::{config::SamplingConfig, decoder::RecordDecoder, ring_buffer::RingBuffer};
 use super::{CpuConfig, PidConfig};
 use error::*;
 use raw::*;
-
-use futures::sync::mpsc::*;
-use num::FromPrimitive;
 
 pub struct Sampler {
     config: SamplingConfig,
@@ -25,18 +27,35 @@ impl Sampler {
     }
 
     pub fn start(self) -> SamplerHandle {
+        use tokio::reactor::PollEvented2;
+        use tokio_codec::FramedRead;
+
         let Self { config, buffer } = self;
 
+        let (stop, stop_recv) = ::futures::sync::oneshot::channel();
+        let (send_events, event_stream) = channel();
+
         let config_dupe = config.clone();
-        let handle = spawn(move || {
+        let sampler_thread = spawn(move || {
             // explicitly move these in for now
             let config_dupe = config_dupe; // why did i do this?
             let buffer = buffer;
+
+            ::tokio::runtime::run(
+                FramedRead::new(PollEvented2::new(buffer), RecordDecoder)
+                    .select(stop_recv.into_stream())
+                    .map_err(|e| {
+                        panic!("TODO error handling somewhere?");
+                    })
+                    .for_each(|record| send_events.send(record)),
+            );
         });
 
-        let sampler_thread: Option<JoinHandle<()>> = Some(handle);
-
-        unimplemented!();
+        SamplerHandle {
+            stop,
+            event_stream,
+            sampler_thread,
+        }
     }
 }
 
@@ -44,22 +63,24 @@ struct StopSampling;
 
 pub struct SamplerHandle {
     stop: Sender<StopSampling>,
-    event_stream: Receiver<Sample>,
-    sampler_thread: Option<JoinHandle<()>>,
+    event_stream: Receiver<Record>,
+    sampler_thread: JoinHandle<()>,
 }
 
-impl SamplerHandle {}
-
-impl Drop for SamplerHandle {
-    fn drop(&mut self) {}
+impl SamplerHandle {
+    pub fn join_with_remaining(self) -> Vec<Record> {
+        let _ = self.stop.send(StopSampling);
+        self.sampler_thread.join().unwrap();
+        self.event_stream.into_iter().collect()
+    }
 }
 
-pub struct Sample {
+pub struct Record {
     misc: Misc,
-    contents: SampledEvent,
+    contents: RecordContents,
 }
 
-pub enum SampledEvent {}
+pub enum RecordContents {}
 
 /// The mmap values start with a header.
 struct EventHeader {

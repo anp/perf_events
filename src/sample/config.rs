@@ -42,11 +42,8 @@ pub struct SamplingConfig {
 
 impl PerfEventAttrThingy for SamplingConfig {
     fn apply(&self, attr: &mut perf_event_attr) {
-        use count::SwEvent;
-        use raw::perf_type_id;
-
-        attr.type_ = perf_type_id::PERF_TYPE_SOFTWARE;
-        attr.config = SwEvent::DummyForSampled as u64;
+        attr.type_ = ::raw::perf_type_id::PERF_TYPE_SOFTWARE;
+        attr.config = ::count::SwEvent::DummyForSampled as u64;
 
         self.rate.apply(attr);
         self.wakeup.apply(attr);
