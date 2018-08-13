@@ -22,17 +22,6 @@ pub struct SamplingConfig {
     //           This defines the size of the user stack to dump if PERF_SAM‐
     //           PLE_STACK_USER is specified.
 
-    //    clockid (since Linux 4.1)
-    //           If use_clockid is set, then this field selects which internal
-    //           Linux timer to use for timestamps.  The available timers are
-    //           defined in linux/time.h, with CLOCK_MONOTONIC, CLOCK_MONO‐
-    //           TONIC_RAW, CLOCK_REALTIME, CLOCK_BOOTTIME, and CLOCK_TAI cur‐
-    //           rently supported.
-
-    //    aux_watermark (since Linux 4.1)
-    //           This specifies how much data is required to trigger a
-    //           PERF_RECORD_AUX sample.
-
     // TODO(anp):
     //    sample_max_stack (since Linux 4.8)
     //           When sample_type includes PERF_SAMPLE_CALLCHAIN, this field
@@ -43,12 +32,7 @@ pub struct SamplingConfig {
 impl ::std::default::Default for SamplingConfig {
     fn default() -> Self {
         SamplingConfig {
-            requests: vec![
-                SampleRequest::Callchain,
-                SampleRequest::InstructionPointer,
-                SampleRequest::Weight,
-                SampleRequest::DataSource,
-            ],
+            requests: vec![SampleRequest::Callchain],
             rate: SamplingRate::Frequency(1000),
             wakeup: WakeupConfig::WatermarkBytes(4_000_000),
             sample_id_all: true,
@@ -375,3 +359,33 @@ sample_id_field! { Cpu: CpuSpec { cpu: u32, res: u32, }, WithCpu, PERF_SAMPLE_CP
 /// SAMPLE_ID in a fixed location, even though it means having duplicate SAMPLE_ID values in
 /// records.
 sample_id_field! { Identifier: IdentifierSpec { id: u64, }, WithIdentifier, PERF_SAMPLE_IDENTIFIER }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_matches() {
+        let config = SamplingConfig::default();
+
+        let mut attr1 = perf_event_attr::default();
+        let mut attr2 = perf_event_attr::default();
+
+        assert_eq!(attr1, attr2);
+
+        attr1.type_ = ::raw::perf_type_id::PERF_TYPE_SOFTWARE;
+        attr1.config = ::raw::perf_sw_ids::PERF_COUNT_SW_DUMMY as u64;
+
+        attr1.sample_type = ::raw::perf_event_sample_format::PERF_SAMPLE_CALLCHAIN as u64;
+
+        attr1.__bindgen_anon_1.sample_period = 1000;
+        attr1.set_freq(1);
+
+        attr1.__bindgen_anon_2.wakeup_watermark = 4000000;
+        attr1.set_watermark(1);
+
+        config.apply(&mut attr2);
+
+        assert_eq!(attr1, attr2);
+    }
+}

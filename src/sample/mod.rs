@@ -1,6 +1,6 @@
 pub mod config;
-mod record;
-mod ring_buffer;
+pub mod record;
+pub mod ring_buffer;
 
 use std::thread::{spawn, JoinHandle};
 
@@ -11,19 +11,19 @@ use self::{
     record::{Record, RecordDecoder},
     ring_buffer::RingBuffer,
 };
-use super::{CpuConfig, PidConfig};
+use super::EventConfig;
 use error::*;
 
 pub struct Sampler {
-    config: SamplingConfig,
+    _config: SamplingConfig,
     buffer: RingBuffer,
 }
 
 impl Sampler {
-    pub fn new(config: SamplingConfig, pid: PidConfig, cpu: CpuConfig) -> Result<Self> {
+    pub fn new(sample_config: SamplingConfig, event_config: EventConfig) -> Result<Self> {
         Ok(Self {
-            config: config.clone(),
-            buffer: RingBuffer::new(config, pid, cpu)?,
+            _config: sample_config.clone(),
+            buffer: RingBuffer::new(sample_config, event_config)?,
         })
     }
 
@@ -31,17 +31,19 @@ impl Sampler {
         unimplemented!();
     }
 
-    pub fn sampled<R>(self, f: impl FnOnce() -> R) -> (R, Vec<Record>, Vec<Error>) {
-        let handle = self.start();
+    pub fn sampled<R>(self, f: impl FnOnce() -> R) -> Result<(R, Vec<Record>, Vec<Error>)> {
+        let handle = self.start()?;
         let user_res = f();
         let samples = handle.join_with_remaining();
-        (user_res, samples.0, samples.1)
+        Ok((user_res, samples.0, samples.1))
     }
 
     /// Launch the sampler on a separate thread, returning a handle from which sampled events can
     /// be collected.
-    pub fn start(self) -> SamplerHandle {
+    pub fn start(self) -> Result<SamplerHandle> {
         let Self { buffer: buf, .. } = self;
+
+        buf.enable_fd()?;
 
         // three channels: a shutdown channel, a results channel, and an error channel
         let (stop, shutdown): (StopSender, StopReceiver) = ::futures::sync::oneshot::channel();
@@ -67,12 +69,12 @@ impl Sampler {
             )
         });
 
-        SamplerHandle {
+        Ok(SamplerHandle {
             stop,
             records,
             errors,
             sampler,
-        }
+        })
     }
 }
 
@@ -112,7 +114,12 @@ mod tests {
 
     #[test]
     fn basic() {
-        let config = SamplingConfig::default();
-        let sampler = Sampler::new(config, PidConfig::Current, CpuConfig::All).unwrap();
+        let _ = ::env_logger::Builder::from_default_env()
+            .filter(None, ::log::LevelFilter::Info)
+            .try_init();
+
+        if let Err(why) = Sampler::new(SamplingConfig::default(), EventConfig::default()) {
+            panic!("{}", why);
+        }
     }
 }

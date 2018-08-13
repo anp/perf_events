@@ -2,14 +2,13 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io;
 use std::io::Read;
-use std::mem::{size_of, zeroed};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use libc::{syscall, SYS_perf_event_open};
 use nix::errno::Errno;
 
-use super::{CpuConfig, PidConfig};
+use super::EventConfig;
 use error::*;
 use raw::perf_event_attr;
 
@@ -21,38 +20,19 @@ pub trait PerfEventAttrThingy {
 pub struct PerfFile(pub(crate) File);
 
 impl PerfFile {
-    pub fn new<A: Debug + PerfEventAttrThingy>(
-        a: A,
-        pid: PidConfig,
-        cpu: CpuConfig,
-    ) -> Result<Self> {
+    pub fn new<A: Debug + PerfEventAttrThingy>(a: A, config: EventConfig) -> Result<Self> {
         // pub(crate) fn as_raw(&self, disabled: bool) -> perf_event_attr {
         // NOTE(unsafe) a zeroed struct is what the example c code uses,
         // zero fields are interpreted as "off" afaict, aside from the required fields
-        let mut attr: perf_event_attr = unsafe { zeroed() };
-
-        a.apply(&mut attr);
-
-        attr.size = size_of::<perf_event_attr>() as u32;
-
-        // we start disabled by default
-        attr.set_disabled(1);
-
-        // from the linux manpage example
-        // TODO move these to configuration
-        attr.set_exclude_kernel(1);
-        attr.set_exclude_hv(1);
-        // make sure any threads spawned after starting to count are included
-        // TODO maybe figure out what inherit_stat actually does?
-        attr.set_inherit(1);
+        let attr = config.raw();
 
         // NOTE(unsafe) it'd be a kernel bug if this caused unsafety, i think
         unsafe {
             let res = syscall(
                 SYS_perf_event_open,
                 &attr,
-                pid.raw(),
-                cpu.raw(),
+                config.pid.raw(),
+                config.cpu.raw(),
                 // ignore group_fd, since we can't set inherit *and* read multiple from a group
                 -1,
                 // NOTE: doesnt seem like this is needed for this library, but
@@ -92,8 +72,8 @@ impl PerfFile {
             perf_event_ioc_enable(self.0.as_raw_fd())
                 .map(|_| ())
                 .map_err(|e| {
-                    debug!("Unable to enable a pe file descriptor: {:?}", e);
-                    Error::Enable { inner: e }
+                    warn!("Unable to enable a pe file descriptor: {:?}", e);
+                    Error::Posix { inner: e }
                 })
         }
     }

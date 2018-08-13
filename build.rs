@@ -8,6 +8,9 @@ fn main() {
         .header("wrapper.h")
         .rust_target(bindgen::RustTarget::Stable_1_25)
         .constified_enum_module("*")
+        .derive_debug(true)
+        .derive_default(true)
+        .derive_partialeq(true)
         .rustfmt_bindings(true);
 
     if std::env::var("TARGET").unwrap().find("linux").is_none() {

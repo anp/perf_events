@@ -3,13 +3,15 @@ use std::io::Result as IoResult;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{fence, Ordering};
 
+use enum_primitive::FromPrimitive;
+use libc;
 use mio::event::Evented;
 use mio::unix::EventedFd;
 use mio::{Poll, PollOpt, Ready, Token};
-use mmap::{MapOption, MemoryMap};
+use nix::errno::errno;
 use page_size::get as page_size;
 
-use super::{config::SamplingConfig, CpuConfig, PidConfig};
+use super::{config::SamplingConfig, EventConfig};
 use error::*;
 use fd::PerfFile;
 use raw::*;
@@ -19,7 +21,8 @@ use raw::*;
 /// through mmap(2).
 pub(crate) struct RingBuffer {
     // SAFETY: this should be before the fd now that rust specifies drop order
-    map: MemoryMap,
+    map: *mut libc::c_void,
+    len: usize,
     file: PerfFile,
     // struct perf_event_mmap_page {
     //     __u32 version;        /* version number of this structure */
@@ -60,33 +63,31 @@ impl RingBuffer {
     /// Creates a new buffer, 8k pages by default.
     ///
     /// TODO(anp): validate this default size in literally any way.
-    pub fn new(config: SamplingConfig, pid: PidConfig, cpu: CpuConfig) -> Result<Self> {
-        Self::with_page_capacity(config, pid, cpu, 8192)
+    pub fn new(sample_config: SamplingConfig, event_config: EventConfig) -> Result<Self> {
+        Self::with_page_capacity(sample_config, event_config, 8192)
+    }
+
+    pub fn enable_fd(&self) -> Result<()> {
+        self.file.enable()
     }
 
     fn with_page_capacity(
-        config: SamplingConfig,
-        pid: PidConfig,
-        cpu: CpuConfig,
+        sample_config: SamplingConfig,
+        event_config: EventConfig,
         num_pages: usize,
     ) -> Result<Self> {
-        let file = PerfFile::new(config, pid, cpu)?;
-        let size = (num_pages + 1) * page_size();
-        let map = MemoryMap::new(
-            size,
-            &[
-                MapOption::MapFd(file.0.as_raw_fd()),
-                MapOption::MapReadable,
-                // setting the writeable flag lets us tell the kernel where we've finished reading
-                MapOption::MapWritable,
-            ],
-        )?;
+        use std::mem::size_of;
+        let file = PerfFile::new(sample_config, event_config)?;
+        let size = (num_pages + 1) * size_of::<perf_event_mmap_page>();
 
-        let metadata = map.data() as *const _ as *mut perf_event_mmap_page;
+        let (map, len) = Self::mmap(file.0.as_raw_fd(), size)?;
+
+        let metadata = map as *const _ as *mut perf_event_mmap_page;
 
         Ok(Self {
             file,
             map,
+            len,
             metadata,
         })
     }
@@ -173,26 +174,26 @@ impl RingBuffer {
         // split
         // ms---------sl-------------------s------ml
 
-        let mmap_start = self.map.data();
-        let mmap_len = self.map.len();
-        let mmap_end = mmap_start.offset(mmap_len as isize);
+        let mmap_end = self.map.offset(self.len as isize);
 
-        let start = mmap_start.offset(offset as isize);
+        let start = self.map.offset(offset as isize);
         let natural_first_end = start.offset(len as isize);
         let (first_len, second_len) = if natural_first_end < mmap_end {
             (len, 0)
         } else {
-            let first_len = mmap_len - offset;
+            let first_len = self.len - offset;
             (first_len, len - first_len)
         };
 
         assert_eq!(first_len + second_len, len);
 
-        let first = ::std::slice::from_raw_parts(start, first_len);
+        let first = ::std::slice::from_raw_parts(start as *mut u8, first_len);
 
         // i'm fairly confident we wont have this issue but the docs aren't super clear
-        let second =
-            ::std::slice::from_raw_parts(mmap_start.offset(page_size() as isize), second_len);
+        let second = ::std::slice::from_raw_parts(
+            self.map.offset(page_size() as isize) as *mut u8,
+            second_len,
+        );
 
         (first, second)
     }
@@ -205,7 +206,7 @@ impl RingBuffer {
 
         // On SMP-capable platforms, after reading the data_head value,
         // user space should issue an rmb().
-        let head = unsafe { (*self.metadata).data_head } as usize % self.map.len();
+        let head = unsafe { (*self.metadata).data_head } as usize % self.len;
 
         // DOCS(anp): need to document this minimum kernel version requirement
         // data_offset (since Linux 4.1)
@@ -234,6 +235,126 @@ impl RingBuffer {
             (*self.metadata).data_tail = new_tail as u64;
         }
     }
+
+    fn mmap(fd: i32, min_len: usize) -> Result<(*mut libc::c_void, usize)> {
+        // before we try to mmap this, we need to make sure it's in async mode!
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+
+        let arg = FcntlArg::F_SETFL(OFlag::O_ASYNC | OFlag::O_NONBLOCK);
+
+        let _ = fcntl(fd, arg)?;
+
+        // make sure we're aligned on a page boundary for the length we request
+        let remainder = min_len % page_size();
+        let length = if remainder == 0 {
+            min_len
+        } else {
+            (min_len - remainder) + page_size()
+        };
+
+        assert!(length % page_size() == 0);
+        assert_ne!(length, 0);
+
+        let r = unsafe {
+            libc::mmap(
+                ::std::ptr::null_mut(),
+                length as libc::size_t,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE,
+                fd,
+                0,
+            )
+        };
+
+        if r == libc::MAP_FAILED {
+            Err(BufferError::from_i32(errno()).unwrap().into())
+        } else {
+            Ok((r as *mut libc::c_void, length))
+        }
+    }
+}
+
+impl ::std::ops::Drop for RingBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.map, self.len);
+        }
+    }
+}
+
+enum_from_primitive! {
+#[repr(i32)]
+#[derive(Debug, Fail)]
+pub enum BufferError {
+    #[fail(
+        display = "A file descriptor refers to a non-regular file.  Or a file mapping was requested,
+        but fd is not open for reading.  Or MAP_SHARED was requested and PROT_WRITE is set, but fd
+        is not open in read/write (O_RDWR) mode.  Or PROT_WRITE is set, but the file is append-only."
+    )]
+    Access = libc::EACCES,
+
+    #[fail(display = "fd is not a valid file descriptor (and MAP_ANONYMOUS was not set).")]
+    FdBad = libc::EBADF,
+
+    #[fail(
+        display = "We don't like addr, length, or offset (e.g., they are too large, or not aligned
+        on a page boundary). length was 0. flags contained neither MAP_PRIVATE or MAP_SHARED, or
+        contained both of these values."
+    )]
+    InvalidArgs = libc::EINVAL,
+
+    #[fail(
+        display = "The underlying filesystem of the specified file does not support memory mapping."
+    )]
+    NoMapSupport = libc::ENODEV,
+
+    #[fail(
+        display = "No memory is available. -or-
+
+        The process's maximum number of mappings would have been exceeded. This error can also
+        occur for munmap(), when unmapping a region in the middle of an existing mapping, since this
+        results in two smaller mappings on either side of the region being unmapped. -or-
+
+        (since Linux 4.7) The process's RLIMIT_DATA limit, described in getrlimit(2), would have
+        been exceeded."
+    )]
+    NoMemory = libc::ENOMEM,
+
+    #[fail(
+        display = "The file has been locked, or too much memory has been locked (see setrlimit(2))."
+    )]
+    TooMuchLocking = libc::EAGAIN,
+
+
+    #[fail(
+        display = "MAP_FIXED_NOREPLACE was specified in flags, and the range covered by addr and
+        length is clashes with an existing mapping."
+    )]
+    ClashesWithExisting = libc::EEXIST,
+
+    #[fail(display = "The system-wide limit on the total number of open files has been reached.")]
+    TooManyOpenFiles = libc::ENFILE,
+
+    #[fail(
+        display = "On 32-bit architecture together with the large file extension (i.e., using 64-bit
+        off_t): the number of pages used for length plus number of pages used for offset would
+        overflow unsigned long (32 bits)."
+    )]
+    Overflow = libc::EOVERFLOW,
+
+    #[fail(
+        display = "The prot argument asks for PROT_EXEC but the mapped area belongs to a file on a
+        filesystem that was mounted no-exec. -or-
+
+        The operation was prevented by a file seal; see fcntl(2)."
+    )]
+    ExecFailed = libc::EPERM,
+
+    #[fail(
+        display = "MAP_DENYWRITE was set but the object specified by fd is open for writing."
+    )]
+    DenyWriteFailed = libc::ETXTBSY,
+}
 }
 
 impl Read for RingBuffer {
@@ -382,3 +503,75 @@ impl Evented for RingBuffer {
 }
 
 unsafe impl Send for RingBuffer {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pretend_were_c() {
+        use std::fs::File;
+        use std::mem::size_of;
+        use std::os::unix::io::FromRawFd;
+
+        use libc::{syscall, SYS_perf_event_open};
+        use nix::errno::Errno;
+
+        use raw::perf_event_attr;
+
+        let mut attr = perf_event_attr::default();
+
+        attr.type_ = ::raw::perf_type_id::PERF_TYPE_SOFTWARE;
+        attr.config = ::raw::perf_sw_ids::PERF_COUNT_SW_DUMMY as u64;
+
+        attr.sample_type = ::raw::perf_event_sample_format::PERF_SAMPLE_CALLCHAIN as u64;
+
+        attr.__bindgen_anon_1.sample_period = 1000;
+        attr.set_freq(1);
+
+        attr.__bindgen_anon_2.wakeup_watermark = 4000000;
+        attr.set_watermark(1);
+
+        attr.set_sample_id_all(1);
+
+        attr.size = size_of::<perf_event_attr>() as u32;
+
+        // we start disabled by default
+        attr.set_disabled(1);
+
+        // from the linux manpage example
+        // TODO move these to configuration
+        attr.set_exclude_kernel(1);
+        attr.set_exclude_hv(1);
+        // make sure any threads spawned after starting to count are included
+        // TODO maybe figure out what inherit_stat actually does?
+        attr.set_inherit(1);
+
+        // panic!("{:#?}", attr);
+
+        unsafe {
+            let res = syscall(
+                SYS_perf_event_open,
+                &attr,
+                -1,
+                -1,
+                // ignore group_fd, since we can't set inherit *and* read multiple from a group
+                -1,
+                // NOTE: doesnt seem like this is needed for this library, but
+                // i could be wrong. CLOEXEC doesn't seem to apply when we won't
+                // leak the file descriptor, NO_GROUP doesn't make since FD_OUTPUT
+                // has been broken since 2.6.35, and PID_CGROUP isn't useful
+                // unless you're running inside containers, which i don't need to
+                // support yet
+                0,
+            );
+
+            if res == -1 {
+                let e = ::error::Error::from(::fd::OpenError::from(Errno::last()));
+                panic!("unable to open: {:?}", e);
+            } else {
+                // NOTE(unsafe) if the kernel doesn't give -1, guarantees the fd is valid
+                let f = File::from_raw_fd(res as i32);
+            }
+        }
+    }
+
+}

@@ -1,8 +1,8 @@
 use failure;
-use mmap;
 use nix;
 
 use fd::OpenError;
+use sample::ring_buffer::BufferError;
 
 pub type Result<T> = ::std::result::Result<T, Error>;
 
@@ -12,14 +12,26 @@ pub enum Error {
     FdOpen { inner: OpenError },
     #[fail(display = "Failed to start collecting metrics: {}", inner)]
     Start { inner: String },
-    #[fail(display = "Failed to enable a perf_events file descriptor: {}", inner)]
-    Enable { inner: nix::Error },
+    #[fail(display = "Failed to interact with a POSIX API: {}", inner)]
+    Posix { inner: nix::Error },
     #[fail(display = "Failed to read from a perf_events file descriptor: {}", inner)]
     Read { inner: ::std::io::Error },
     #[fail(display = "Failed to mmap a perf_events file descriptor: {}", inner)]
-    Mmap { inner: mmap::MapError },
+    Mmap { inner: BufferError },
     #[fail(display = "Encountered an unknown error: {}", inner)]
     Misc { inner: failure::Error },
+}
+
+impl From<nix::Error> for Error {
+    fn from(inner: nix::Error) -> Self {
+        Error::Posix { inner }
+    }
+}
+
+impl From<BufferError> for Error {
+    fn from(inner: BufferError) -> Self {
+        Error::Mmap { inner }
+    }
 }
 
 impl From<failure::Error> for Error {
@@ -37,11 +49,5 @@ impl From<OpenError> for Error {
 impl From<::std::io::Error> for Error {
     fn from(inner: ::std::io::Error) -> Self {
         Error::Read { inner }
-    }
-}
-
-impl From<mmap::MapError> for Error {
-    fn from(inner: mmap::MapError) -> Self {
-        Error::Mmap { inner }
     }
 }

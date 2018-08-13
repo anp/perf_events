@@ -14,7 +14,7 @@ use raw::perf_sw_ids::*;
 
 use raw::{perf_event_attr, perf_type_id};
 
-use super::{CpuConfig, PidConfig};
+use super::EventConfig;
 use error::*;
 use fd::{PerfEventAttrThingy, PerfFile};
 
@@ -25,8 +25,8 @@ pub struct Counter {
 }
 
 impl Counter {
-    pub fn new(event: Counted, pid: PidConfig, cpu: CpuConfig) -> Result<Self> {
-        let file = PerfFile::new(event.clone(), pid, cpu)?;
+    pub fn new(event: Counted, config: EventConfig) -> Result<Self> {
+        let file = PerfFile::new(event.clone(), config)?;
         Ok(Self { event, file })
     }
 
