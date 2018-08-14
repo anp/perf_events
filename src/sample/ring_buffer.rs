@@ -4,12 +4,12 @@ use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{fence, Ordering};
 
 use enum_primitive::FromPrimitive;
+use futures::prelude::*;
 use libc;
-use mio::event::Evented;
-use mio::unix::EventedFd;
-use mio::{Poll, PollOpt, Ready, Token};
+use mio::Ready;
 use nix::errno::errno;
 use page_size::get as page_size;
+use tokio::reactor::PollEvented2;
 
 use super::{config::SamplingConfig, EventConfig};
 use error::*;
@@ -20,44 +20,45 @@ use raw::*;
 /// PROT_EXEC mmap tracking) are logged into a ring-buffer. This ring-buffer is created and accessed
 /// through mmap(2).
 pub(crate) struct RingBuffer {
+    poller: PollEvented2<PerfFile>,
     // SAFETY: this should be before the fd now that rust specifies drop order
-    map: *mut libc::c_void,
+    base: *mut libc::c_void,
     len: usize,
-    file: PerfFile,
-    // struct perf_event_mmap_page {
-    //     __u32 version;        /* version number of this structure */
-    //     __u32 compat_version; /* lowest version this is compat with */
-    //     __u32 lock;           /* seqlock for synchronization */
-    //     __u32 index;          /* hardware counter identifier */
-    //     __s64 offset;         /* add to hardware counter value */
-    //     __u64 time_enabled;   /* time event active */
-    //     __u64 time_running;   /* time event on CPU */
-    //     union {
-    //         __u64   capabilities;
-    //         struct {
-    //             __u64 cap_usr_time / cap_usr_rdpmc / cap_bit0 : 1,
-    //                   cap_bit0_is_deprecated : 1,
-    //                   cap_user_rdpmc         : 1,
-    //                   cap_user_time          : 1,
-    //                   cap_user_time_zero     : 1,
-    //         };
-    //     };
-    //     __u16 pmc_width;
-    //     __u16 time_shift;
-    //     __u32 time_mult;
-    //     __u64 time_offset;
-    //     __u64 __reserved[120];   /* Pad to 1 k */
-    //     __u64 data_head;         /* head in the data section */
-    //     __u64 data_tail;         /* user-space written tail */
-    //     __u64 data_offset;       /* where the buffer starts */
-    //     __u64 data_size;         /* data buffer size */
-    //     __u64 aux_head;
-    //     __u64 aux_tail;
-    //     __u64 aux_offset;
-    //     __u64 aux_size;
-    // }
+    prev: Option<u64>,
+    start: Option<u64>,
+    end: Option<u64>,
+    overwrite: bool,
     metadata: *mut perf_event_mmap_page,
 }
+
+impl Stream for RingBuffer {
+    type Item = Vec<u8>;
+    type Error = Error;
+
+    fn poll(&mut self) -> Result<Async<Option<Vec<u8>>>> {
+        if let Async::Ready(_) = self.poller.poll_read_ready(Ready::readable())? {
+            debug!("fd is ready, dumping to buffer");
+
+            let read = self.read_chunk()?;
+
+            self.poller.clear_read_ready(Ready::readable())?;
+
+            Ok(Async::Ready(Some(read)))
+        } else {
+            Ok(Async::NotReady)
+        }
+    }
+}
+
+enum State {
+    NotReady,
+    Running,
+    DataPending,
+    Empty,
+}
+
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use std::mem::size_of;
 
 impl RingBuffer {
     /// Creates a new buffer, 8k pages by default.
@@ -68,30 +69,94 @@ impl RingBuffer {
     }
 
     pub fn enable_fd(&self) -> Result<()> {
-        self.file.enable()
+        self.poller.get_ref().enable()
     }
 
     fn with_page_capacity(
         sample_config: SamplingConfig,
         event_config: EventConfig,
-        num_pages: usize,
+        pages: usize,
     ) -> Result<Self> {
-        use std::mem::size_of;
+        let len = (pages + 1) * page_size();
+        // FIXME(anp): this should return an Err
+        assert!(pages != 0 && (pages & (pages - 1)) == 0);
+        // make sure we're aligned on a page boundary for the length we request
+        assert!(len % page_size() == 0);
+
         let file = PerfFile::new(sample_config, event_config)?;
-        let size = (num_pages + 1) * size_of::<perf_event_mmap_page>();
 
-        let (map, len) = Self::mmap(file.0.as_raw_fd(), size)?;
+        let fd = file.0.as_raw_fd();
 
-        let metadata = map as *const _ as *mut perf_event_mmap_page;
+        // before we try to mmap this, we need to make sure it's in async mode!
+        fcntl(fd, FcntlArg::F_SETFL(OFlag::O_ASYNC | OFlag::O_NONBLOCK))?;
+
+        let base = unsafe {
+            libc::mmap(
+                ::std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+
+        if base == libc::MAP_FAILED {
+            Err(BufferError::from_i32(errno()).unwrap())?
+        }
+
+        let metadata = base as *const _ as *mut perf_event_mmap_page;
 
         Ok(Self {
-            file,
-            map,
-            len,
+            poller: PollEvented2::new(file),
+            base,
             metadata,
+            len,
+            prev: None,
+            end: None,
+            start: None,
+            overwrite: false,
         })
     }
 
+    pub fn read_chunk(&mut self) -> Result<Vec<u8>> {
+        unimplemented!();
+    }
+
+    /// This points to the head of the data section. The value continuously increases, it does not
+    /// wrap. The value needs to be manually wrapped by the size of the mmap buffer before accessing
+    /// the samples. On SMP-capable platforms, after reading the data_head value, user space should
+    /// issue an rmb().
+    fn head(&self) -> u64 {
+        let head = unsafe { (*self.metadata).data_head };
+        fence(Ordering::Acquire); // i *think* this corresponds to rmb() (lfence on x86)
+        head
+    }
+
+    /// Contains the size of the perf sample region within the mmap buffer. (since Linux 4.1)
+    fn size(&self) -> u64 {
+        unsafe { (*self.metadata).data_size }
+    }
+
+    /// Contains the offset of the location in the mmap buffer where perf sample data begins.
+    fn offset(&self) -> u64 {
+        // DOCS(anp): need to document this minimum kernel version requirement
+        // data_offset (since Linux 4.1)
+        unsafe { (*self.metadata).data_offset }
+    }
+
+    /// When the mapping is PROT_WRITE, the data_tail value should be written by user space to
+    /// reflect the last read data.  In this case, the kernel will not overwrite unread data.
+    fn set_tail(&mut self, new_tail: u64) {
+        // NOTE(anp): we guarantee PROT_WRITE in our constructors
+        fence(Ordering::Release); // i *think* this corresponds to mb() (mfence on x86)
+        unsafe {
+            (*self.metadata).data_tail = new_tail as u64;
+        }
+    }
+}
+
+impl RingBuffer {
     // Time the event was active.
     //
     // Note: author of this crate isn't *entirely* sure of the semantics here either.
@@ -157,127 +222,52 @@ impl RingBuffer {
     //            timestamp = time_zero + quot * time_mult +
     //                ((rem * time_mult) >> time_shift);
 
-    unsafe fn slices(&self, offset: usize, len: usize) -> (&[u8], &[u8]) {
-        // ms = mmap_start
-        // ml = mmap_len
-        // s = start
-        //   always greater than mmap_start (offset is unsigned)
-        // l = len
-        //
+    //     unsafe fn slices(&self, offset: usize, len: usize) -> (&[u8], &[u8]) {
+    //         // ms = mmap_start
+    //         // ml = mmap_len
+    //         // s = start
+    //         //   always greater than mmap_start (offset is unsigned)
+    //         // l = len
+    //         //
 
-        // contiguous
-        // ms---------s-------------------sl------ml
+    //         // contiguous
+    //         // ms---------s-------------------sl------ml
 
-        // contiguous ending at end of mmap
-        // ms--------------------s-------------sl|ml
+    //         // contiguous ending at end of mmap
+    //         // ms--------------------s-------------sl|ml
 
-        // split
-        // ms---------sl-------------------s------ml
+    //         // split
+    //         // ms---------sl-------------------s------ml
 
-        let mmap_end = self.map.offset(self.len as isize);
+    //         let mmap_end = self.base.offset(self.len() as isize);
 
-        let start = self.map.offset(offset as isize);
-        let natural_first_end = start.offset(len as isize);
-        let (first_len, second_len) = if natural_first_end < mmap_end {
-            (len, 0)
-        } else {
-            let first_len = self.len - offset;
-            (first_len, len - first_len)
-        };
+    //         let start = self.base.offset(offset as isize);
+    //         let natural_first_end = start.offset(len as isize);
+    //         let (first_len, second_len) = if natural_first_end < mmap_end {
+    //             (len, 0)
+    //         } else {
+    //             let first_len = self.len() - offset;
+    //             (first_len, len - first_len)
+    //         };
 
-        assert_eq!(first_len + second_len, len);
+    //         assert_eq!(first_len + second_len, len);
 
-        let first = ::std::slice::from_raw_parts(start as *mut u8, first_len);
+    //         let first = ::std::slice::from_raw_parts(start as *mut u8, first_len);
 
-        // i'm fairly confident we wont have this issue but the docs aren't super clear
-        let second = ::std::slice::from_raw_parts(
-            self.map.offset(page_size() as isize) as *mut u8,
-            second_len,
-        );
+    //         // i'm fairly confident we wont have this issue but the docs aren't super clear
+    //         let second = ::std::slice::from_raw_parts(
+    //             self.base.offset(page_size() as isize) as *mut u8,
+    //             second_len,
+    //         );
 
-        (first, second)
-    }
-
-    fn head_offset_len(&self) -> (usize, usize, usize) {
-        // This points to the head of the data section.  The value con‐
-        // tinuously increases, it does not wrap.  The value needs to be
-        // manually wrapped by the size of the mmap buffer before access‐
-        // ing the samples.
-
-        // On SMP-capable platforms, after reading the data_head value,
-        // user space should issue an rmb().
-        let head = unsafe { (*self.metadata).data_head } as usize % self.len;
-
-        // DOCS(anp): need to document this minimum kernel version requirement
-        // data_offset (since Linux 4.1)
-        //        Contains the offset of the location in the mmap buffer where
-        //        perf sample data begins.
-        let offset = unsafe { (*self.metadata).data_offset } as usize;
-
-        assert!(offset <= head);
-
-        // data_size (since Linux 4.1)
-        //        Contains the size of the perf sample region within the mmap
-        //        buffer.
-        let len = unsafe { (*self.metadata).data_size } as usize;
-
-        fence(Ordering::Acquire); // i *think* this corresponds to rmb() (lfence on x86)
-
-        (head, offset, len)
-    }
-
-    /// When the mapping is PROT_WRITE, the data_tail value should be written by user space to
-    /// reflect the last read data.  In this case, the kernel will not overwrite unread data.
-    fn set_tail(&mut self, new_tail: usize) {
-        // NOTE(anp): we guarantee PROT_WRITE in our constructors
-        fence(Ordering::Release); // i *think* this corresponds to mb() (mfence on x86)
-        unsafe {
-            (*self.metadata).data_tail = new_tail as u64;
-        }
-    }
-
-    fn mmap(fd: i32, min_len: usize) -> Result<(*mut libc::c_void, usize)> {
-        // before we try to mmap this, we need to make sure it's in async mode!
-        use nix::fcntl::{fcntl, FcntlArg, OFlag};
-
-        let arg = FcntlArg::F_SETFL(OFlag::O_ASYNC | OFlag::O_NONBLOCK);
-
-        let _ = fcntl(fd, arg)?;
-
-        // make sure we're aligned on a page boundary for the length we request
-        let remainder = min_len % page_size();
-        let length = if remainder == 0 {
-            min_len
-        } else {
-            (min_len - remainder) + page_size()
-        };
-
-        assert!(length % page_size() == 0);
-        assert_ne!(length, 0);
-
-        let r = unsafe {
-            libc::mmap(
-                ::std::ptr::null_mut(),
-                length as libc::size_t,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE,
-                fd,
-                0,
-            )
-        };
-
-        if r == libc::MAP_FAILED {
-            Err(BufferError::from_i32(errno()).unwrap().into())
-        } else {
-            Ok((r as *mut libc::c_void, length))
-        }
-    }
+    //         (first, second)
+    //     }
 }
 
 impl ::std::ops::Drop for RingBuffer {
     fn drop(&mut self) {
         unsafe {
-            libc::munmap(self.map, self.len);
+            libc::munmap(self.base, self.len);
         }
     }
 }
@@ -359,18 +349,19 @@ pub enum BufferError {
 
 impl Read for RingBuffer {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        let (head, offset, len) = self.head_offset_len();
+        let head = self.head();
 
         // we might only get to copy some portion of the bytes
-        let len = len.min(buf.len());
+        let len = self.len.min(buf.len());
 
-        {
-            let (first_src, second_src) = unsafe { self.slices(offset, len) };
-            let (first_dest, second_dest) = (&mut buf[..len]).split_at_mut(first_src.len());
+        // {
+        //     let (first_src, second_src) = unsafe { self.slices(offset as usize, len as usize) };
+        //     let (first_dest, second_dest) =
+        //         (&mut buf[..len as usize]).split_at_mut(first_src.len());
 
-            first_dest.copy_from_slice(first_src);
-            second_dest.copy_from_slice(second_src);
-        }
+        //     first_dest.copy_from_slice(first_src);
+        //     second_dest.copy_from_slice(second_src);
+        // }
 
         self.set_tail(head);
 
@@ -478,100 +469,8 @@ impl Read for RingBuffer {
         //            pmc <<= 64 - pmc_width;
         //            pmc >>= 64 - pmc_width; // signed shift right
         //            count += pmc;
-        Ok(len)
-    }
-}
-
-impl Evented for RingBuffer {
-    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> IoResult<()> {
-        EventedFd(&self.file.0.as_raw_fd()).register(poll, token, interest, opts)
-    }
-
-    fn reregister(
-        &self,
-        poll: &Poll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> IoResult<()> {
-        EventedFd(&self.file.0.as_raw_fd()).reregister(poll, token, interest, opts)
-    }
-
-    fn deregister(&self, poll: &Poll) -> IoResult<()> {
-        EventedFd(&self.file.0.as_raw_fd()).deregister(poll)
+        Ok(len as usize)
     }
 }
 
 unsafe impl Send for RingBuffer {}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn pretend_were_c() {
-        use std::fs::File;
-        use std::mem::size_of;
-        use std::os::unix::io::FromRawFd;
-
-        use libc::{syscall, SYS_perf_event_open};
-        use nix::errno::Errno;
-
-        use raw::perf_event_attr;
-
-        let mut attr = perf_event_attr::default();
-
-        attr.type_ = ::raw::perf_type_id::PERF_TYPE_SOFTWARE;
-        attr.config = ::raw::perf_sw_ids::PERF_COUNT_SW_DUMMY as u64;
-
-        attr.sample_type = ::raw::perf_event_sample_format::PERF_SAMPLE_CALLCHAIN as u64;
-
-        attr.__bindgen_anon_1.sample_period = 1000;
-        attr.set_freq(1);
-
-        attr.__bindgen_anon_2.wakeup_watermark = 4000000;
-        attr.set_watermark(1);
-
-        attr.set_sample_id_all(1);
-
-        attr.size = size_of::<perf_event_attr>() as u32;
-
-        // we start disabled by default
-        attr.set_disabled(1);
-
-        // from the linux manpage example
-        // TODO move these to configuration
-        attr.set_exclude_kernel(1);
-        attr.set_exclude_hv(1);
-        // make sure any threads spawned after starting to count are included
-        // TODO maybe figure out what inherit_stat actually does?
-        attr.set_inherit(1);
-
-        // panic!("{:#?}", attr);
-
-        unsafe {
-            let res = syscall(
-                SYS_perf_event_open,
-                &attr,
-                -1,
-                -1,
-                // ignore group_fd, since we can't set inherit *and* read multiple from a group
-                -1,
-                // NOTE: doesnt seem like this is needed for this library, but
-                // i could be wrong. CLOEXEC doesn't seem to apply when we won't
-                // leak the file descriptor, NO_GROUP doesn't make since FD_OUTPUT
-                // has been broken since 2.6.35, and PID_CGROUP isn't useful
-                // unless you're running inside containers, which i don't need to
-                // support yet
-                0,
-            );
-
-            if res == -1 {
-                let e = ::error::Error::from(::fd::OpenError::from(Errno::last()));
-                panic!("unable to open: {:?}", e);
-            } else {
-                // NOTE(unsafe) if the kernel doesn't give -1, guarantees the fd is valid
-                let f = File::from_raw_fd(res as i32);
-            }
-        }
-    }
-
-}

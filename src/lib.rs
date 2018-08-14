@@ -5,10 +5,14 @@
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
+extern crate crossbeam_channel as channel;
+#[macro_use]
 extern crate enum_primitive;
 extern crate failure;
 #[macro_use]
 extern crate failure_derive;
+#[macro_use]
+extern crate futures;
 #[macro_use]
 extern crate log;
 #[macro_use]
@@ -19,7 +23,6 @@ extern crate serde_derive;
 extern crate strum_macros;
 
 extern crate bytes;
-extern crate futures;
 extern crate libc;
 extern crate mio;
 extern crate mmap;
@@ -28,7 +31,6 @@ extern crate page_size;
 extern crate serde;
 extern crate strum;
 extern crate tokio;
-extern crate tokio_codec;
 
 #[cfg(test)]
 extern crate env_logger;

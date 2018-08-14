@@ -1,18 +1,56 @@
-use bytes::BytesMut;
+use channel::Sender;
+use futures::{Async, Stream};
+use mio::Ready;
 use num::FromPrimitive;
-use tokio_codec::Decoder;
 
-use error::Error;
+use error::{Error, Result};
 use raw::*;
+use sample::ring_buffer::RingBuffer;
 
-pub struct RecordDecoder;
+pub struct Decoder {
+    buffer: RingBuffer,
+    error_channel: Sender<Error>,
+    record_channel: Sender<Record>,
+}
 
-impl Decoder for RecordDecoder {
-    type Item = Record;
-    type Error = Error;
+impl Decoder {
+    pub(crate) fn new(
+        buffer: RingBuffer,
+        record_channel: Sender<Record>,
+        error_channel: Sender<Error>,
+    ) -> Self {
+        Self {
+            buffer,
+            record_channel,
+            error_channel,
+        }
+    }
 
-    fn decode(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+    fn parse_records(bytes: Vec<u8>) -> Vec<Record> {
         unimplemented!();
+    }
+}
+
+impl Stream for Decoder {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> ::std::result::Result<Async<Option<Self::Item>>, Self::Error> {
+        info!("getting polled");
+        match self.buffer.poll() {
+            Ok(Async::Ready(Some(chunk))) => {
+                for record in Self::parse_records(chunk) {
+                    self.record_channel.send(record);
+                }
+                Ok(Async::NotReady)
+            }
+            Err(why) => {
+                error!("problem reading fd: {:?}", why);
+                self.error_channel.send(why);
+                Err(())
+            }
+            _ => Ok(Async::NotReady),
+        }
     }
 }
 

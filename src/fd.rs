@@ -2,10 +2,12 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io;
 use std::io::Read;
+use std::io::Result as IoResult;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use libc::{syscall, SYS_perf_event_open};
+use mio::{unix::EventedFd, Evented, Poll, PollOpt, Ready, Token};
 use nix::errno::Errno;
 
 use super::EventConfig;
@@ -76,6 +78,26 @@ impl PerfFile {
                     Error::Posix { inner: e }
                 })
         }
+    }
+}
+
+impl Evented for PerfFile {
+    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> IoResult<()> {
+        EventedFd(&self.0.as_raw_fd()).register(poll, token, interest, opts)
+    }
+
+    fn reregister(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> IoResult<()> {
+        EventedFd(&self.0.as_raw_fd()).reregister(poll, token, interest, opts)
+    }
+
+    fn deregister(&self, poll: &Poll) -> IoResult<()> {
+        EventedFd(&self.0.as_raw_fd()).deregister(poll)
     }
 }
 

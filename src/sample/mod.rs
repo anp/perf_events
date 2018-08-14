@@ -4,11 +4,9 @@ pub mod ring_buffer;
 
 use std::thread::{spawn, JoinHandle};
 
-use futures::{self, prelude::*};
-
 use self::{
     config::SamplingConfig,
-    record::{Record, RecordDecoder},
+    record::{Decoder, Record},
     ring_buffer::RingBuffer,
 };
 use super::EventConfig;
@@ -27,15 +25,23 @@ impl Sampler {
         })
     }
 
-    pub fn thread_id(&self) -> i32 {
-        unimplemented!();
-    }
+    pub fn sampled<R>(
+        self,
+        f: impl FnOnce() -> R,
+    ) -> ::std::result::Result<(R, Vec<Record>), (Option<R>, Error)> {
+        info!("starting sampler");
+        let handle = match self.start() {
+            Ok(h) => h,
+            Err(why) => return Err((None, why)),
+        };
 
-    pub fn sampled<R>(self, f: impl FnOnce() -> R) -> Result<(R, Vec<Record>, Vec<Error>)> {
-        let handle = self.start()?;
         let user_res = f();
-        let samples = handle.join_with_remaining();
-        Ok((user_res, samples.0, samples.1))
+
+        info!("terminating sampler");
+        match handle.join_with_remaining() {
+            Ok(samples) => Ok((user_res, samples)),
+            Err(why) => Err((Some(user_res), why)),
+        }
     }
 
     /// Launch the sampler on a separate thread, returning a handle from which sampled events can
@@ -43,67 +49,75 @@ impl Sampler {
     pub fn start(self) -> Result<SamplerHandle> {
         let Self { buffer: buf, .. } = self;
 
+        debug!("enabling our ring buffer's file descriptor");
         buf.enable_fd()?;
 
         // three channels: a shutdown channel, a results channel, and an error channel
         let (stop, shutdown): (StopSender, StopReceiver) = ::futures::sync::oneshot::channel();
-        let (record_sender, records): (RecordSender, RecordReceiver) = ::std::sync::mpsc::channel();
-        let (error_sender, errors): (ErrorSender, ErrorReceiver) = ::std::sync::mpsc::channel();
+        let (record_sender, records) = channel::unbounded();
+        let (error_sender, error) = channel::bounded(1);
 
+        debug!("spawning sampler thread");
         let sampler = spawn(move || {
-            ::tokio::runtime::run(
-                ::tokio_codec::FramedRead::new(
-                    ::tokio::reactor::PollEvented2::new(buf),
-                    RecordDecoder,
-                ).map(move |r| {
-                    record_sender
-                        .send(r)
-                        // if records are failing to send, we'll be cancelled soon anyways!
-                        .unwrap_or_else(|_| ())
-                })
-                    // i'm of two minds about this -- if we fail to decode things, we might just
-                    // to taint the entire sampler.
-                    .map_err(move |e| error_sender.send(e).unwrap())
-                    .select(shutdown.into_stream().map(|_| ()).map_err(|_| ()))
-                    .for_each(|()| futures::future::ok(())),
-            )
+            use futures::{future::ok, Stream};
+            use tokio::executor::current_thread::CurrentThread;
+
+            debug!("creating executor");
+            let mut executor = CurrentThread::new();
+
+            // we want to keep running the sampler in the background on this thread
+            debug!("spawning decoder");
+            executor.spawn(Decoder::new(buf, record_sender, error_sender).for_each(|()| ok(())));
+
+            // this runs the executor until the shutdown channel has a value
+            debug!("running executor until shutdown message received");
+            executor.block_on(shutdown).unwrap();
+
+            debug!("shutdown message received, sampler thread exiting");
         });
 
         Ok(SamplerHandle {
             stop,
             records,
-            errors,
+            error,
             sampler,
         })
     }
 }
 
-struct StopSampling;
+use channel::{self, Receiver};
+
+pub struct StopSampling;
 type StopSender = ::futures::sync::oneshot::Sender<StopSampling>;
-type StopReceiver = ::futures::sync::oneshot::Receiver<StopSampling>;
-
-pub type RecordSender = ::std::sync::mpsc::Sender<Record>;
-pub type RecordReceiver = ::std::sync::mpsc::Receiver<Record>;
-
-pub type ErrorSender = ::std::sync::mpsc::Sender<Error>;
-pub type ErrorReceiver = ::std::sync::mpsc::Receiver<Error>;
+pub(crate) type StopReceiver = ::futures::sync::oneshot::Receiver<StopSampling>;
 
 pub struct SamplerHandle {
     stop: StopSender,
-    records: RecordReceiver,
-    errors: ErrorReceiver,
+    records: Receiver<Record>,
+    error: Receiver<Error>,
     sampler: JoinHandle<()>,
 }
 
 impl SamplerHandle {
-    pub fn join_with_remaining(self) -> (Vec<Record>, Vec<Error>) {
+    pub fn join_with_remaining(self) -> Result<Vec<Record>> {
+        debug!("sending stop signal to sampler thread");
         let _its_ok_if_we_already_sent_one = self.stop.send(StopSampling);
-        self.sampler.join().unwrap();
 
-        (
-            self.records.into_iter().collect(),
-            self.errors.into_iter().collect(),
-        )
+        debug!("joining on sampler thread");
+        if let Err(why) = self.sampler.join() {
+            return Err(Error::Misc {
+                inner: ::failure::err_msg(format!("sampler thread panicked: {:?}", why)),
+            });
+        }
+
+        debug!("sampler thread has terminated");
+        if let Some(e) = self.error.recv() {
+            return Err(e);
+        }
+
+        debug!("no errors reported from sampler thread.");
+
+        Ok(self.records.into_iter().collect())
     }
 }
 
@@ -115,11 +129,20 @@ mod tests {
     #[test]
     fn basic() {
         let _ = ::env_logger::Builder::from_default_env()
-            .filter(None, ::log::LevelFilter::Info)
+            .filter(None, ::log::LevelFilter::Debug)
             .try_init();
 
-        if let Err(why) = Sampler::new(SamplingConfig::default(), EventConfig::default()) {
-            panic!("{}", why);
-        }
+        let sampler = Sampler::new(SamplingConfig::default(), EventConfig::default()).unwrap();
+
+        let ((), samples) = sampler
+            .sampled(|| {
+                info!("starting fake bench run");
+                for _ in 0..10_000_000 {
+                    // do something
+                    trace!("noop");
+                }
+                info!("fake bench run complete");
+            })
+            .unwrap();
     }
 }
