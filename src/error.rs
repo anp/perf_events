@@ -1,7 +1,7 @@
 use failure;
 use nix;
 
-use fd::OpenError;
+use fd::{FileControlError, OpenError};
 use sample::ring_buffer::BufferError;
 
 pub type Result<T> = ::std::result::Result<T, Error>;
@@ -18,6 +18,8 @@ pub enum Error {
     Read { inner: ::std::io::Error },
     #[fail(display = "Failed to mmap a perf_events file descriptor: {}", inner)]
     Mmap { inner: BufferError },
+    #[fail(display = "Failed to call fcntl on a perf_events file descriptor: {}", inner)]
+    Fcntl { inner: FileControlError },
     #[fail(display = "Encountered an unknown error: {}", inner)]
     Misc { inner: failure::Error },
 }
@@ -31,6 +33,12 @@ impl From<nix::Error> for Error {
 impl From<BufferError> for Error {
     fn from(inner: BufferError) -> Self {
         Error::Mmap { inner }
+    }
+}
+
+impl From<FileControlError> for Error {
+    fn from(inner: FileControlError) -> Self {
+        Error::Fcntl { inner }
     }
 }
 

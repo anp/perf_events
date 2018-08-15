@@ -12,76 +12,76 @@ use self::{
 use super::EventConfig;
 use error::*;
 
-pub struct Sampler {
-    _config: SamplingConfig,
-    buffer: RingBuffer,
-}
+/// Launch the sampler on a separate thread, returning a handle from which sampled events can
+/// be collected.
+pub fn sampler(sample_config: SamplingConfig) -> Result<SamplerHandle> {
+    debug!("enabling our ring buffer's file descriptor");
 
-impl Sampler {
-    pub fn new(sample_config: SamplingConfig, event_config: EventConfig) -> Result<Self> {
-        Ok(Self {
-            _config: sample_config.clone(),
-            buffer: RingBuffer::new(sample_config, event_config)?,
-        })
-    }
+    // three channels: a shutdown channel, a results channel, and an error channel
+    let (stop, shutdown): (StopSender, StopReceiver) = ::futures::sync::oneshot::channel();
+    let (record_sender, records) = channel::unbounded();
+    let (error_sender, error) = channel::bounded(1);
 
-    pub fn sampled<R>(
-        self,
-        f: impl FnOnce() -> R,
-    ) -> ::std::result::Result<(R, Vec<Record>), (Option<R>, Error)> {
-        info!("starting sampler");
-        let handle = match self.start() {
-            Ok(h) => h,
-            Err(why) => return Err((None, why)),
-        };
+    let outer_error_sender = error_sender.clone();
 
-        let user_res = f();
-
-        info!("terminating sampler");
-        match handle.join_with_remaining() {
-            Ok(samples) => Ok((user_res, samples)),
-            Err(why) => Err((Some(user_res), why)),
-        }
-    }
-
-    /// Launch the sampler on a separate thread, returning a handle from which sampled events can
-    /// be collected.
-    pub fn start(self) -> Result<SamplerHandle> {
-        let Self { buffer: buf, .. } = self;
-
-        debug!("enabling our ring buffer's file descriptor");
-        buf.enable_fd()?;
-
-        // three channels: a shutdown channel, a results channel, and an error channel
-        let (stop, shutdown): (StopSender, StopReceiver) = ::futures::sync::oneshot::channel();
-        let (record_sender, records) = channel::unbounded();
-        let (error_sender, error) = channel::bounded(1);
-
-        debug!("spawning sampler thread");
-        let sampler = spawn(move || {
-            use futures::{future::ok, Stream};
-            use tokio::executor::current_thread::CurrentThread;
+    debug!("spawning sampler thread");
+    let sampler = spawn(move || {
+        let f = move || -> Result<()> {
+            use futures::{
+                future::{empty, ok},
+                Stream,
+            };
+            use tokio::runtime::current_thread::Runtime;
 
             debug!("creating executor");
-            let mut executor = CurrentThread::new();
+            let mut rt = Runtime::new()?;
+            rt.spawn(empty()); // start the runtime
+
+            let buffer = RingBuffer::new(sample_config)?;
+            buffer.enable_fd()?;
 
             // we want to keep running the sampler in the background on this thread
             debug!("spawning decoder");
-            executor.spawn(Decoder::new(buf, record_sender, error_sender).for_each(|()| ok(())));
+            rt.spawn(Decoder::new(buffer, record_sender, error_sender).for_each(|()| ok(())));
 
             // this runs the executor until the shutdown channel has a value
             debug!("running executor until shutdown message received");
-            executor.block_on(shutdown).unwrap();
+            rt.block_on(shutdown).unwrap();
 
             debug!("shutdown message received, sampler thread exiting");
-        });
+            Ok(())
+        };
 
-        Ok(SamplerHandle {
-            stop,
-            records,
-            error,
-            sampler,
-        })
+        if let Err(why) = f() {
+            error!("error on sampler thread: {:?}", why);
+            outer_error_sender.send(why);
+        }
+    });
+
+    Ok(SamplerHandle {
+        stop,
+        records,
+        error,
+        sampler,
+    })
+}
+
+pub fn sampled<R>(
+    sample_config: SamplingConfig,
+    f: impl FnOnce() -> R,
+) -> ::std::result::Result<(R, Vec<Record>), (Option<R>, Error)> {
+    info!("starting sampler");
+    let handle = match sampler(sample_config) {
+        Ok(h) => h,
+        Err(why) => return Err((None, why)),
+    };
+
+    let user_res = f();
+
+    info!("terminating sampler");
+    match handle.join_with_remaining() {
+        Ok(samples) => Ok((user_res, samples)),
+        Err(why) => Err((Some(user_res), why)),
     }
 }
 
@@ -126,23 +126,31 @@ mod tests {
     use super::config::*;
     use super::*;
 
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     #[test]
     fn basic() {
         let _ = ::env_logger::Builder::from_default_env()
             .filter(None, ::log::LevelFilter::Debug)
+            .filter(Some("tokio_reactor"), ::log::LevelFilter::Info)
             .try_init();
 
-        let sampler = Sampler::new(SamplingConfig::default(), EventConfig::default()).unwrap();
+        let mut res = Vec::new();
 
-        let ((), samples) = sampler
-            .sampled(|| {
-                info!("starting fake bench run");
-                for _ in 0..10_000_000 {
-                    // do something
-                    trace!("noop");
-                }
-                info!("fake bench run complete");
-            })
-            .unwrap();
+        let ((), samples) = sampled(SamplingConfig::default(), || {
+            info!("starting fake bench run");
+            for _ in 0..1_000 {
+                let mut hasher = DefaultHasher::new();
+                (0..5_000)
+                    .into_iter()
+                    .map(|n| (::rand::random(), n))
+                    .collect::<Vec<(u64, usize)>>()
+                    .hash(&mut hasher);
+                res.push(hasher.finish());
+            }
+            info!("fake bench run complete");
+        }).unwrap();
+        assert_ne!(samples.len(), 0);
     }
 }

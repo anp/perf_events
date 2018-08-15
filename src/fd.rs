@@ -1,16 +1,18 @@
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
+use std::io::Error as IoError;
 use std::io::Read;
 use std::io::Result as IoResult;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
-use libc::{syscall, SYS_perf_event_open};
+use libc::*;
 use mio::{unix::EventedFd, Evented, Poll, PollOpt, Ready, Token};
+use nix::errno::errno;
 use nix::errno::Errno;
 
-use super::EventConfig;
+use super::{CpuConfig, PidConfig};
 use error::*;
 use raw::perf_event_attr;
 
@@ -22,19 +24,23 @@ pub trait PerfEventAttrThingy {
 pub struct PerfFile(pub(crate) File);
 
 impl PerfFile {
-    pub fn new<A: Debug + PerfEventAttrThingy>(a: A, config: EventConfig) -> Result<Self> {
+    pub fn new(
+        config: impl Debug + Into<perf_event_attr> + AsRef<PidConfig> + AsRef<CpuConfig>,
+    ) -> Result<Self> {
         // pub(crate) fn as_raw(&self, disabled: bool) -> perf_event_attr {
         // NOTE(unsafe) a zeroed struct is what the example c code uses,
         // zero fields are interpreted as "off" afaict, aside from the required fields
-        let attr = config.raw();
+        let pid: PidConfig = *config.as_ref();
+        let cpu: CpuConfig = *config.as_ref();
+        let attr = config.into();
 
         // NOTE(unsafe) it'd be a kernel bug if this caused unsafety, i think
         unsafe {
             let res = syscall(
                 SYS_perf_event_open,
                 &attr,
-                config.pid.raw(),
-                config.cpu.raw(),
+                pid.raw(),
+                cpu.raw(),
                 // ignore group_fd, since we can't set inherit *and* read multiple from a group
                 -1,
                 // NOTE: doesnt seem like this is needed for this library, but
@@ -48,7 +54,7 @@ impl PerfFile {
 
             if res == -1 {
                 let e = Error::from(OpenError::from(Errno::last()));
-                debug!("unable to open {:?}: {:?}", a, e);
+                debug!("unable to open {:?}: {:?}", attr, e);
                 Err(e)
             } else {
                 // NOTE(unsafe) if the kernel doesn't give -1, guarantees the fd is valid
@@ -83,6 +89,35 @@ impl PerfFile {
 
 impl Evented for PerfFile {
     fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> IoResult<()> {
+        info!("registering {:?}", self.0);
+
+        // before we try to mmap this, we need to make sure it's in async mode!
+        // i think this is done by registering with mio?
+        // if 0 != unsafe { libc::fcntl(fd, F_SETSIG, libc::SIGIO) } {
+        //     let e = errno();
+        //     return Err(FileControlError::from_i32(e).unwrap().into());
+        // }
+
+        //The F_SETOWN_EX option to fcntl(2) is needed to properly get overflow
+        //    signals in threads.  This was introduced in Linux 2.6.32.
+        #[repr(C)]
+        struct FOwnerEx(c_int, pid_t);
+
+        info!("getting thread id");
+        let owner = FOwnerEx(F_OWNER_TID, unsafe { syscall(SYS_gettid) as pid_t });
+
+        let fd = self.0.as_raw_fd();
+
+        info!("setting recipient thread for overflow notifs");
+        if 0 != unsafe { fcntl(fd, F_SETOWN_EX, &owner) } {
+            return Err(IoError::from_raw_os_error(errno()));
+        }
+
+        if 0 != unsafe { fcntl(fd, F_SETFL, O_ASYNC | O_NONBLOCK | O_RDONLY) } {
+            return Err(IoError::from_raw_os_error(errno()));
+        }
+
+        info!("registering our file descriptor with the event loop");
         EventedFd(&self.0.as_raw_fd()).register(poll, token, interest, opts)
     }
 
@@ -93,10 +128,12 @@ impl Evented for PerfFile {
         interest: Ready,
         opts: PollOpt,
     ) -> IoResult<()> {
+        info!("reregistering {:?}", self.0);
         EventedFd(&self.0.as_raw_fd()).reregister(poll, token, interest, opts)
     }
 
     fn deregister(&self, poll: &Poll) -> IoResult<()> {
+        info!("deregistering {:?}", self.0);
         EventedFd(&self.0.as_raw_fd()).deregister(poll)
     }
 }
@@ -263,31 +300,121 @@ impl DerefMut for PerfFile {
     }
 }
 
-//    Overflow handling
-//        Events can be set to notify when a threshold is crossed, indicating
-//        an overflow.  Overflow conditions can be captured by monitoring the
-//        event file descriptor with poll(2), select(2), or epoll(7).  Alterna‐
-//        tively, the overflow events can be captured via sa signal handler, by
-//        enabling I/O signaling on the file descriptor; see the discussion of
-//        the F_SETOWN and F_SETSIG operations in fcntl(2).
+enum_from_primitive! {
+#[repr(i32)]
+#[derive(Debug, Fail)]
+pub enum FileControlError {
+    #[fail(display = "Operation is prohibited by locks held by other processes.")]
+    Prohibited = EACCES,
 
-//        Overflows are generated only by sampling events (sample_period must
-//        have a nonzero value).
+    #[fail(
+        display = "The operation is prohibited because the file has been memory-mapped by another
+        process."
+    )]
+    MappedByAnother = EAGAIN,
 
-//        There are two ways to generate overflow notifications.
+    #[fail(
+        display = "fd is not an open file descriptor.
 
-//        The first is to set a wakeup_events or wakeup_watermark value that
-//        will trigger if a certain number of samples or bytes have been writ‐
-//        ten to the mmap ring buffer.  In this case, POLL_IN is indicated.
+        -or-
 
-//        The other way is by use of the PERF_EVENT_IOC_REFRESH ioctl.  This
-//        ioctl adds to a counter that decrements each time the event over‐
-//        flows.  When nonzero, POLL_IN is indicated, but once the counter
-//        reaches 0 POLL_HUP is indicated and the underlying event is disabled.
+        cmd is F_SETLK or F_SETLKW and the file descriptor open mode doesn't match with the type of
+        lock requested."
+    )]
+    BadFd = EBADF,
 
-//        Refreshing an event group leader refreshes all siblings and refresh‐
-//        ing with a parameter of 0 currently enables infinite refreshes; these
-//        behaviors are unsupported and should not be relied on.
+    #[fail(
+        display = "cmd is F_SETPIPE_SZ and the new pipe capacity specified in arg is smaller than
+        the amount of buffer space currently used to store data in the pipe.
 
-//        Starting with Linux 3.18, POLL_HUP is indicated if the event being
-//        monitored is attached to a different process and that process exits.
+        -or-
+
+        cmd is F_ADD_SEALS, arg includes F_SEAL_WRITE, and there exists a writable, shared mapping
+        on the file referred to by fd."
+    )]
+    Busy = EBUSY,
+
+    #[fail(
+        display = "It was detected that the specified F_SETLKW command would cause a deadlock."
+    )]
+    WouldDeadlock = EDEADLK,
+
+    #[fail(display = "lock is outside your accessible address space.")]
+    Unaddressable = EFAULT,
+
+    #[fail(
+        display = "cmd is F_SETLKW or F_OFD_SETLKW and the operation was interrupted by a signal;
+        see signal(7).
+        -or-
+        cmd is F_GETLK, F_SETLK, F_OFD_GETLK, or F_OFD_SETLK, and the operation was interrupted by a
+        signal before the lock was checked or acquired. Most likely when locking a remote file
+        (e.g., locking over NFS), but can sometimes happen locally."
+    )]
+    Interrupted = EINTR,
+
+    #[fail(
+        display = "The value specified in cmd is not recognized by this kernel.
+
+        -or-
+
+        cmd is F_ADD_SEALS and arg includes an unrecognized sealing bit.
+
+        -or-
+
+        cmd is F_ADD_SEALS or F_GET_SEALS and the filesystem containing the inode referred to by fd
+        does not support sealing.
+
+        -or-
+
+        cmd is F_DUPFD and arg is negative or is greater than the maximum allowable value (see the
+        discussion of RLIMIT_NOFILE in getrlimit(2)).
+
+        -or-
+
+        cmd is F_SETSIG and arg is not an allowable signal number.
+
+        -or-
+
+        cmd is F_OFD_SETLK, F_OFD_SETLKW, or F_OFD_GETLK, and l_pid was not specified as zero."
+    )]
+    InsertCowboyBebopReferenceHereBecauseItsEinval = EINVAL,
+
+    #[fail(
+        display = "cmd is F_DUPFD and the per-process limit on the number of open file descriptors
+        has been reached."
+    )]
+    TooManyOpenFiles = EMFILE,
+
+    #[fail(
+        display = "Too many segment locks open, lock table is full, or a remote locking protocol
+        failed (e.g., locking over NFS)."
+    )]
+    LockingFailed = ENOLCK,
+
+    #[fail(display = "F_NOTIFY was specified in cmd, but fd does not refer to a directory.")]
+    NotADirectory = ENOTDIR,
+
+    #[fail(
+        display = "cmd is F_SETPIPE_SZ and the soft or hard user pipe limit has been reached; see
+        pipe(7).
+
+        -or-
+
+        Attempted to clear the O_APPEND flag on a file that has the append-only attribute set.
+
+        -or-
+
+        cmd was F_ADD_SEALS, but fd was not open for writing or the current set of seals on the file
+        already includes F_SEAL_SEAL."
+    )]
+    SeveralMiscellaneousErrors = EPERM,
+}
+}
+
+// https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/fcntl.h#L115
+// #define F_SETSIG	10	/* for sockets. */
+const F_SETSIG: i32 = 10;
+// #define F_OWNER_TID 0
+const F_OWNER_TID: c_int = 0;
+// #define F_SETOWN_EX 15
+const F_SETOWN_EX: c_int = 15;

@@ -29,6 +29,7 @@ tokio-codec = "0.1"
 [dev-dependencies]
 env_logger = "0.5"
 pretty_assertions = "0.5"
+rand = "0.5"
 
 [build-dependencies]
 bindgen = "0.37"

@@ -5,14 +5,10 @@
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
-extern crate crossbeam_channel as channel;
-#[macro_use]
 extern crate enum_primitive;
 extern crate failure;
 #[macro_use]
 extern crate failure_derive;
-#[macro_use]
-extern crate futures;
 #[macro_use]
 extern crate log;
 #[macro_use]
@@ -23,6 +19,8 @@ extern crate serde_derive;
 extern crate strum_macros;
 
 extern crate bytes;
+extern crate crossbeam_channel as channel;
+extern crate futures;
 extern crate libc;
 extern crate mio;
 extern crate mmap;
@@ -37,6 +35,8 @@ extern crate env_logger;
 #[cfg(test)]
 #[macro_use]
 extern crate pretty_assertions;
+#[cfg(test)]
+extern crate rand;
 
 pub(crate) mod count;
 pub mod error;
@@ -48,9 +48,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use libc::pid_t;
 
-use count::{Counted, Counter};
+use count::{CountConfig, Counted, Counter};
 pub use error::*;
-use fd::PerfEventAttrThingy;
 
 pub struct Perf {
     counters: Vec<Counter>,
@@ -134,7 +133,11 @@ impl PerfBuilder {
         let mut failures = BTreeMap::new();
 
         for event in self.to_count {
-            match Counter::new(event.clone(), self.config.clone()) {
+            let config = CountConfig {
+                shared: self.config.clone(),
+                event: event.clone(),
+            };
+            match Counter::new(config) {
                 Ok(c) => counters.push(c),
                 Err(why) => {
                     failures.insert(event, why);
@@ -158,7 +161,7 @@ impl PerfBuilder {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize)]
 pub struct EventConfig {
     pub pid: PidConfig,
     pub cpu: CpuConfig,
@@ -215,6 +218,25 @@ pub struct EventConfig {
     pub aux_watermark: Option<u32>,
 }
 
+impl ::std::default::Default for EventConfig {
+    fn default() -> Self {
+        EventConfig {
+            aux_watermark: None,
+            clockid: None,
+            exclude_guest: true,
+            exclude_host: false,
+            inherit_stat: false,
+            inherit: false,
+            exclude_idle: false,
+            exclude_hv: false,
+            exclude_kernel: false,
+            exclude_user: false,
+            pid: PidConfig::Current,
+            cpu: CpuConfig::All,
+        }
+    }
+}
+
 use raw::perf_event_attr;
 
 impl EventConfig {
@@ -222,19 +244,6 @@ impl EventConfig {
         use std::mem::{size_of, zeroed};
         let mut attr: perf_event_attr = unsafe { zeroed() };
 
-        self.apply(&mut attr);
-
-        attr.size = size_of::<perf_event_attr>() as u32;
-
-        // we start disabled by default, regardless of config
-        attr.set_disabled(1);
-
-        attr
-    }
-}
-
-impl fd::PerfEventAttrThingy for EventConfig {
-    fn apply(&self, attr: &mut raw::perf_event_attr) {
         attr.set_exclude_user(self.exclude_user as u64);
         attr.set_exclude_kernel(self.exclude_kernel as u64);
         attr.set_exclude_hv(self.exclude_hv as u64);
@@ -252,10 +261,17 @@ impl fd::PerfEventAttrThingy for EventConfig {
             attr.set_use_clockid(1);
             attr.clockid = clock;
         }
+
+        attr.size = size_of::<perf_event_attr>() as u32;
+
+        // we start disabled by default, regardless of config
+        attr.set_disabled(1);
+
+        attr
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize)]
 pub enum PidConfig {
     Current,
     Other(pid_t),
@@ -276,7 +292,7 @@ impl Default for PidConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize)]
 pub enum CpuConfig {
     All,
     Specific(i32),

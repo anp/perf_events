@@ -14,20 +14,46 @@ use raw::perf_sw_ids::*;
 
 use raw::{perf_event_attr, perf_type_id};
 
-use super::EventConfig;
+use super::{CpuConfig, EventConfig, PidConfig};
 use error::*;
 use fd::{PerfEventAttrThingy, PerfFile};
 
 #[derive(Debug)]
 pub struct Counter {
-    event: Counted,
+    config: CountConfig,
     file: PerfFile,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CountConfig {
+    pub event: Counted,
+    pub shared: EventConfig,
+}
+
+impl Into<::raw::perf_event_attr> for CountConfig {
+    fn into(self) -> ::raw::perf_event_attr {
+        let mut attr = self.shared.raw();
+        self.event.apply(&mut attr);
+        attr
+    }
+}
+
+impl AsRef<CpuConfig> for CountConfig {
+    fn as_ref(&self) -> &CpuConfig {
+        &self.shared.cpu
+    }
+}
+
+impl AsRef<PidConfig> for CountConfig {
+    fn as_ref(&self) -> &PidConfig {
+        &self.shared.pid
+    }
+}
+
 impl Counter {
-    pub fn new(event: Counted, config: EventConfig) -> Result<Self> {
-        let file = PerfFile::new(event.clone(), config)?;
-        Ok(Self { event, file })
+    pub fn new(config: CountConfig) -> Result<Self> {
+        let file = PerfFile::new(config)?;
+        Ok(Self { config, file })
     }
 
     pub fn enable(&self) -> Result<()> {
@@ -47,11 +73,11 @@ impl Counter {
 
         self.file.read(&mut value_slice)?;
 
-        Ok((self.event.clone(), value))
+        Ok((self.config.event.clone(), value))
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize)]
 #[serde(untagged)]
 pub enum Counted {
     Hardware(HwEvent),

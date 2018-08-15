@@ -1,7 +1,9 @@
-use std::io::Read;
-use std::io::Result as IoResult;
-use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{fence, Ordering};
+use std::{
+    borrow::Cow,
+    mem::size_of,
+    os::unix::io::AsRawFd,
+    sync::atomic::{fence, Ordering},
+};
 
 use enum_primitive::FromPrimitive;
 use futures::prelude::*;
@@ -11,7 +13,10 @@ use nix::errno::errno;
 use page_size::get as page_size;
 use tokio::reactor::PollEvented2;
 
-use super::{config::SamplingConfig, EventConfig};
+use super::{
+    config::SamplingConfig,
+    record::{EventHeader, Record},
+};
 use error::*;
 use fd::PerfFile;
 use raw::*;
@@ -21,74 +26,39 @@ use raw::*;
 /// through mmap(2).
 pub(crate) struct RingBuffer {
     poller: PollEvented2<PerfFile>,
-    // SAFETY: this should be before the fd now that rust specifies drop order
     base: *mut libc::c_void,
     len: usize,
-    prev: Option<u64>,
-    start: Option<u64>,
-    end: Option<u64>,
-    overwrite: bool,
     metadata: *mut perf_event_mmap_page,
+    prev: usize,
+    start: usize,
+    end: usize,
+    // interval_started: bool,
 }
-
-impl Stream for RingBuffer {
-    type Item = Vec<u8>;
-    type Error = Error;
-
-    fn poll(&mut self) -> Result<Async<Option<Vec<u8>>>> {
-        if let Async::Ready(_) = self.poller.poll_read_ready(Ready::readable())? {
-            debug!("fd is ready, dumping to buffer");
-
-            let read = self.read_chunk()?;
-
-            self.poller.clear_read_ready(Ready::readable())?;
-
-            Ok(Async::Ready(Some(read)))
-        } else {
-            Ok(Async::NotReady)
-        }
-    }
-}
-
-enum State {
-    NotReady,
-    Running,
-    DataPending,
-    Empty,
-}
-
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use std::mem::size_of;
 
 impl RingBuffer {
+    const DEFAULT_PAGES: usize = 128;
+
     /// Creates a new buffer, 8k pages by default.
     ///
     /// TODO(anp): validate this default size in literally any way.
-    pub fn new(sample_config: SamplingConfig, event_config: EventConfig) -> Result<Self> {
-        Self::with_page_capacity(sample_config, event_config, 8192)
+    pub fn new(sample_config: SamplingConfig) -> Result<Self> {
+        Self::with_page_capacity(sample_config, Self::DEFAULT_PAGES)
     }
 
     pub fn enable_fd(&self) -> Result<()> {
         self.poller.get_ref().enable()
     }
 
-    fn with_page_capacity(
-        sample_config: SamplingConfig,
-        event_config: EventConfig,
-        pages: usize,
-    ) -> Result<Self> {
+    fn with_page_capacity(sample_config: SamplingConfig, pages: usize) -> Result<Self> {
         let len = (pages + 1) * page_size();
         // FIXME(anp): this should return an Err
         assert!(pages != 0 && (pages & (pages - 1)) == 0);
         // make sure we're aligned on a page boundary for the length we request
         assert!(len % page_size() == 0);
 
-        let file = PerfFile::new(sample_config, event_config)?;
+        let file = PerfFile::new(sample_config)?;
 
         let fd = file.0.as_raw_fd();
-
-        // before we try to mmap this, we need to make sure it's in async mode!
-        fcntl(fd, FcntlArg::F_SETFL(OFlag::O_ASYNC | OFlag::O_NONBLOCK))?;
 
         let base = unsafe {
             libc::mmap(
@@ -112,42 +82,42 @@ impl RingBuffer {
             base,
             metadata,
             len,
-            prev: None,
-            end: None,
-            start: None,
-            overwrite: false,
+            prev: 0,
+            end: 0,
+            start: 0,
         })
     }
 
-    pub fn read_chunk(&mut self) -> Result<Vec<u8>> {
-        unimplemented!();
+    pub fn is_empty(&self) -> bool {
+        // 	TODO handle aux map;
+        self.head() == self.prev
     }
 
     /// This points to the head of the data section. The value continuously increases, it does not
     /// wrap. The value needs to be manually wrapped by the size of the mmap buffer before accessing
     /// the samples. On SMP-capable platforms, after reading the data_head value, user space should
     /// issue an rmb().
-    fn head(&self) -> u64 {
+    fn head(&self) -> usize {
         let head = unsafe { (*self.metadata).data_head };
         fence(Ordering::Acquire); // i *think* this corresponds to rmb() (lfence on x86)
-        head
+        head as usize
     }
 
     /// Contains the size of the perf sample region within the mmap buffer. (since Linux 4.1)
-    fn size(&self) -> u64 {
-        unsafe { (*self.metadata).data_size }
+    fn size(&self) -> usize {
+        unsafe { (*self.metadata).data_size as usize }
     }
 
     /// Contains the offset of the location in the mmap buffer where perf sample data begins.
-    fn offset(&self) -> u64 {
+    fn offset(&self) -> usize {
         // DOCS(anp): need to document this minimum kernel version requirement
         // data_offset (since Linux 4.1)
-        unsafe { (*self.metadata).data_offset }
+        unsafe { (*self.metadata).data_offset as usize }
     }
 
     /// When the mapping is PROT_WRITE, the data_tail value should be written by user space to
     /// reflect the last read data.  In this case, the kernel will not overwrite unread data.
-    fn set_tail(&mut self, new_tail: u64) {
+    fn set_tail(&mut self, new_tail: usize) {
         // NOTE(anp): we guarantee PROT_WRITE in our constructors
         fence(Ordering::Release); // i *think* this corresponds to mb() (mfence on x86)
         unsafe {
@@ -156,7 +126,100 @@ impl RingBuffer {
     }
 }
 
+impl Stream for RingBuffer {
+    type Item = Record;
+    type Error = Error;
+
+    fn poll(&mut self) -> Result<Async<Option<Self::Item>>> {
+        // if !self.interval_started {
+        //     let handle = ::tokio::prelude::task::current();
+        //     let timer = Interval::new(Instant::now(), Duration::from_secs(2))
+        //         .map(move |_| {
+        //             trace!("refreshing sampler readiness");
+        //             handle.notify();
+        //         })
+        //         .map_err(|e| panic!("timer error: {:?}", e))
+        //         .for_each(|()| ::futures::future::ok(()));
+
+        //     ::tokio::spawn(timer);
+        // }
+
+        trace!("ring buffer polled");
+        let res = if let Async::Ready(_) = self.poller.poll_read_ready(Ready::readable())? {
+            info!("file descriptor was ready, parsing records");
+            self.next()
+        } else {
+            None
+        };
+
+        trace!("clearing fd readiness");
+        self.poller.clear_read_ready(Ready::readable())?;
+
+        if let Some(r) = res {
+            Ok(Async::Ready(Some(r?)))
+        } else {
+            Ok(Async::NotReady)
+        }
+    }
+}
+
+impl Iterator for RingBuffer {
+    type Item = Result<Record>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        trace!("next record...");
+        let (header, event_bytes) = self.next_event_bytes()?;
+        info!("parsing record");
+        Some(Record::from_slice(header, &event_bytes))
+    }
+}
+
 impl RingBuffer {
+    fn next_event_bytes(&mut self) -> Option<(EventHeader, Cow<[u8]>)> {
+        let header_size = size_of::<perf_event_header>();
+        unsafe {
+            self.end = self.head();
+
+            assert!(
+                self.end >= self.start,
+                "we wrapped around and we dont support that yet lol"
+            );
+
+            let diff = self.end - self.start;
+
+            if diff < header_size {
+                debug!("gap between start and end is too small for a header");
+                return None;
+            }
+
+            let data = self.base.offset(page_size() as isize);
+
+            let raw_header: &perf_event_header =
+                &*(data.offset(self.start as isize) as *const perf_event_header);
+            let header = ::sample::record::EventHeader::from(raw_header);
+            let event_size = header.size;
+
+            if event_size < header_size {
+                debug!("reported event size is too small, no data here");
+                return None;
+            }
+
+            if diff < event_size {
+                debug!("gap between start and and is too small for described event");
+                return None;
+            }
+
+            let event_start =
+                (raw_header as *const _ as *const libc::c_void).offset(header_size as isize);
+
+            let start = self.start;
+            self.set_tail(start);
+            self.prev = self.head();
+
+            None
+        }
+    }
+
     // Time the event was active.
     //
     // Note: author of this crate isn't *entirely* sure of the semantics here either.
@@ -221,56 +284,15 @@ impl RingBuffer {
     //            rem  = cyc & (((u64)1 << time_shift) - 1);
     //            timestamp = time_zero + quot * time_mult +
     //                ((rem * time_mult) >> time_shift);
-
-    //     unsafe fn slices(&self, offset: usize, len: usize) -> (&[u8], &[u8]) {
-    //         // ms = mmap_start
-    //         // ml = mmap_len
-    //         // s = start
-    //         //   always greater than mmap_start (offset is unsigned)
-    //         // l = len
-    //         //
-
-    //         // contiguous
-    //         // ms---------s-------------------sl------ml
-
-    //         // contiguous ending at end of mmap
-    //         // ms--------------------s-------------sl|ml
-
-    //         // split
-    //         // ms---------sl-------------------s------ml
-
-    //         let mmap_end = self.base.offset(self.len() as isize);
-
-    //         let start = self.base.offset(offset as isize);
-    //         let natural_first_end = start.offset(len as isize);
-    //         let (first_len, second_len) = if natural_first_end < mmap_end {
-    //             (len, 0)
-    //         } else {
-    //             let first_len = self.len() - offset;
-    //             (first_len, len - first_len)
-    //         };
-
-    //         assert_eq!(first_len + second_len, len);
-
-    //         let first = ::std::slice::from_raw_parts(start as *mut u8, first_len);
-
-    //         // i'm fairly confident we wont have this issue but the docs aren't super clear
-    //         let second = ::std::slice::from_raw_parts(
-    //             self.base.offset(page_size() as isize) as *mut u8,
-    //             second_len,
-    //         );
-
-    //         (first, second)
-    //     }
 }
 
-impl ::std::ops::Drop for RingBuffer {
-    fn drop(&mut self) {
-        unsafe {
-            libc::munmap(self.base, self.len);
-        }
-    }
-}
+// impl ::std::ops::Drop for RingBuffer {
+//     fn drop(&mut self) {
+//         unsafe {
+//             libc::munmap(self.base, self.len);
+//         }
+//     }
+// }
 
 enum_from_primitive! {
 #[repr(i32)]
@@ -346,131 +368,3 @@ pub enum BufferError {
     DenyWriteFailed = libc::ETXTBSY,
 }
 }
-
-impl Read for RingBuffer {
-    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        let head = self.head();
-
-        // we might only get to copy some portion of the bytes
-        let len = self.len.min(buf.len());
-
-        // {
-        //     let (first_src, second_src) = unsafe { self.slices(offset as usize, len as usize) };
-        //     let (first_dest, second_dest) =
-        //         (&mut buf[..len as usize]).split_at_mut(first_src.len());
-
-        //     first_dest.copy_from_slice(first_src);
-        //     second_dest.copy_from_slice(second_src);
-        // }
-
-        self.set_tail(head);
-
-        // TODO(anp): figure out how we need to use these
-
-        // version
-        //        Version number of this structure.
-
-        // compat_version
-        //        The lowest version this is compatible with.
-
-        // lock   A seqlock for synchronization.
-
-        // index  A unique hardware counter identifier.
-
-        // offset When using rdpmc for reads this offset value must be added to
-        //        the one returned by rdpmc to get the current total event
-        //        count.
-
-        // aux_head, aux_tail, aux_offset, aux_size (since Linux 4.1)
-        //        The AUX region allows mmaping a separate sample buffer for
-        //        high-bandwidth data streams (separate from the main perf sam‐
-        //        ple buffer).  An example of a high-bandwidth stream is
-        //        instruction tracing support, as is found in newer Intel pro‐
-        //        cessors.
-
-        //        To set up an AUX area, first aux_offset needs to be set with
-        //        an offset greater than data_offset+data_size and aux_size
-        //        needs to be set to the desired buffer size.  The desired off‐
-        //        set and size must be page aligned, and the size must be a
-        //        power of two.  These values are then passed to mmap in order
-        //        to map the AUX buffer.  Pages in the AUX buffer are included
-        //        as part of the RLIMIT_MEMLOCK resource limit (see
-        //        setrlimit(2)), and also as part of the perf_event_mlock_kb
-        //        allowance.
-
-        //        By default, the AUX buffer will be truncated if it will not
-        //        fit in the available space in the ring buffer.  If the AUX
-        //        buffer is mapped as a read only buffer, then it will operate
-        //        in ring buffer mode where old data will be overwritten by new.
-        //        In overwrite mode, it might not be possible to infer where the
-        //        new data began, and it is the consumer's job to disable mea‐
-        //        surement while reading to avoid possible data races.
-
-        //        The aux_head and aux_tail ring buffer pointers have the same
-        //        behavior and ordering rules as the previous described
-        //        data_head and data_tail.
-
-        // cap_bit0_is_deprecated (since Linux 3.12)
-        //        If set, this bit indicates that the kernel supports the prop‐
-        //        erly separated cap_user_time and cap_user_rdpmc bits.
-
-        //        If not-set, it indicates an older kernel where cap_usr_time
-        //        and cap_usr_rdpmc map to the same bit and thus both features
-        //        should be used with caution.
-
-        // cap_user_rdpmc (since Linux 3.12)
-        //        If the hardware supports user-space read of performance coun‐
-        //        ters without syscall (this is the "rdpmc" instruction on x86),
-        //        then the following code can be used to do a read:
-
-        //            u32 seq, time_mult, time_shift, idx, width;
-        //            u64 count, enabled, running;
-        //            u64 cyc, time_offset;
-
-        //            do {
-        //                seq = pc->lock;
-        //                barrier();
-        //                enabled = pc->time_enabled;
-        //                running = pc->time_running;
-
-        //                if (pc->cap_usr_time && enabled != running) {
-        //                    cyc = rdtsc();
-        //                    time_offset = pc->time_offset;
-        //                    time_mult   = pc->time_mult;
-        //                    time_shift  = pc->time_shift;
-        //                }
-
-        //                idx = pc->index;
-        //                count = pc->offset;
-
-        //                if (pc->cap_usr_rdpmc && idx) {
-        //                    width = pc->pmc_width;
-        //                    count += rdpmc(idx - 1);
-        //                }
-
-        //                barrier();
-        //            } while (pc->lock != seq);
-
-        // cap_usr_time / cap_usr_rdpmc / cap_bit0 (since Linux 3.4)
-        //        There was a bug in the definition of cap_usr_time and
-        //        cap_usr_rdpmc from Linux 3.4 until Linux 3.11.  Both bits were
-        //        defined to point to the same location, so it was impossible to
-        //        know if cap_usr_time or cap_usr_rdpmc were actually set.
-
-        //        Starting with Linux 3.12, these are renamed to cap_bit0 and
-        //        you should use the cap_user_time and cap_user_rdpmc fields
-        //        instead.
-
-        // pmc_width
-        //        If cap_usr_rdpmc, this field provides the bit-width of the
-        //        value read using the rdpmc or equivalent instruction.  This
-        //        can be used to sign extend the result like:
-
-        //            pmc <<= 64 - pmc_width;
-        //            pmc >>= 64 - pmc_width; // signed shift right
-        //            count += pmc;
-        Ok(len as usize)
-    }
-}
-
-unsafe impl Send for RingBuffer {}
