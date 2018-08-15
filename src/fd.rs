@@ -90,34 +90,6 @@ impl PerfFile {
 impl Evented for PerfFile {
     fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> IoResult<()> {
         info!("registering {:?}", self.0);
-
-        // before we try to mmap this, we need to make sure it's in async mode!
-        // i think this is done by registering with mio?
-        // if 0 != unsafe { libc::fcntl(fd, F_SETSIG, libc::SIGIO) } {
-        //     let e = errno();
-        //     return Err(FileControlError::from_i32(e).unwrap().into());
-        // }
-
-        //The F_SETOWN_EX option to fcntl(2) is needed to properly get overflow
-        //    signals in threads.  This was introduced in Linux 2.6.32.
-        #[repr(C)]
-        struct FOwnerEx(c_int, pid_t);
-
-        info!("getting thread id");
-        let owner = FOwnerEx(F_OWNER_TID, unsafe { syscall(SYS_gettid) as pid_t });
-
-        let fd = self.0.as_raw_fd();
-
-        info!("setting recipient thread for overflow notifs");
-        if 0 != unsafe { fcntl(fd, F_SETOWN_EX, &owner) } {
-            return Err(IoError::from_raw_os_error(errno()));
-        }
-
-        if 0 != unsafe { fcntl(fd, F_SETFL, O_ASYNC | O_NONBLOCK | O_RDONLY) } {
-            return Err(IoError::from_raw_os_error(errno()));
-        }
-
-        info!("registering our file descriptor with the event loop");
         EventedFd(&self.0.as_raw_fd()).register(poll, token, interest, opts)
     }
 
