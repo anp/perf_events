@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     mem::size_of,
     os::unix::io::AsRawFd,
+    ptr::NonNull,
     sync::atomic::{fence, Ordering},
 };
 
@@ -25,18 +26,61 @@ use raw::*;
 /// PROT_EXEC mmap tracking) are logged into a ring-buffer. This ring-buffer is created and accessed
 /// through mmap(2).
 pub(crate) struct RingBuffer {
+    metadata: NonNull<MmapHeader>,
     poller: PollEvented2<PerfFile>,
-    base: *mut libc::c_void,
-    len: usize,
-    metadata: *mut perf_event_mmap_page,
+    data_section_start: NonNull<u8>,
     prev: usize,
     start: usize,
     end: usize,
-    // interval_started: bool,
+}
+
+#[repr(C)]
+struct MmapHeader {
+    inner: perf_event_mmap_page,
+}
+
+impl MmapHeader {
+    /// This points to the head of the data section. The value continuously increases, it does not
+    /// wrap. The value needs to be manually wrapped by the size of the mmap buffer before accessing
+    /// the samples. On SMP-capable platforms, after reading the data_head value, user space should
+    /// issue an rmb().
+    fn head_index(&self) -> usize {
+        let head = self.inner.data_head;
+        fence(Ordering::Acquire); // i *think* this corresponds to rmb() (lfence on x86)
+        head as usize
+    }
+
+    /// Contains the size of the perf sample region within the mmap buffer. (since Linux 4.1)
+    fn data_section_len(&self) -> usize {
+        self.inner.data_size as usize
+    }
+
+    /// Contains the offset of the location in the mmap buffer where perf sample data begins.
+    fn data_section_start_index(&self) -> usize {
+        // DOCS(anp): need to document this minimum kernel version requirement
+        // data_offset (since Linux 4.1)
+        self.inner.data_offset as usize
+    }
+
+    /// When the mapping is PROT_WRITE, the data_tail value should be written by user space to
+    /// reflect the last read data.  In this case, the kernel will not overwrite unread data.
+    fn set_tail_index(&mut self, new_tail: usize) {
+        // NOTE(anp): we guarantee PROT_WRITE in our constructors
+        fence(Ordering::Release); // i *think* this corresponds to mb() (mfence on x86)
+        self.inner.data_tail = new_tail as u64;
+    }
 }
 
 impl RingBuffer {
     const DEFAULT_PAGES: usize = 128;
+
+    fn header(&self) -> &MmapHeader {
+        unsafe { self.metadata.as_ref() }
+    }
+
+    fn header_mut(&mut self) -> &mut MmapHeader {
+        unsafe { self.metadata.as_mut() }
+    }
 
     /// Creates a new buffer, 8k pages by default.
     ///
@@ -75,54 +119,36 @@ impl RingBuffer {
             Err(BufferError::from_i32(errno()).unwrap())?
         }
 
-        let metadata = base as *const _ as *mut perf_event_mmap_page;
+        let metadata = NonNull::new(base as *const _ as *mut perf_event_mmap_page)
+            .unwrap()
+            .cast::<MmapHeader>();
+
+        let data_section_start = NonNull::new(unsafe {
+            base.offset(metadata.as_ref().data_section_start_index() as isize) as *mut u8
+        }).unwrap();
 
         Ok(Self {
             poller: PollEvented2::new(file),
-            base,
+            data_section_start,
             metadata,
-            len,
             prev: 0,
             end: 0,
             start: 0,
         })
     }
 
+    fn data(&self) -> &[u8] {
+        unsafe {
+            ::std::slice::from_raw_parts(
+                self.data_section_start.as_ptr(),
+                self.header().data_section_len(),
+            )
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         // 	TODO handle aux map;
-        self.head() == self.prev
-    }
-
-    /// This points to the head of the data section. The value continuously increases, it does not
-    /// wrap. The value needs to be manually wrapped by the size of the mmap buffer before accessing
-    /// the samples. On SMP-capable platforms, after reading the data_head value, user space should
-    /// issue an rmb().
-    fn head(&self) -> usize {
-        let head = unsafe { (*self.metadata).data_head };
-        fence(Ordering::Acquire); // i *think* this corresponds to rmb() (lfence on x86)
-        head as usize
-    }
-
-    /// Contains the size of the perf sample region within the mmap buffer. (since Linux 4.1)
-    fn size(&self) -> usize {
-        unsafe { (*self.metadata).data_size as usize }
-    }
-
-    /// Contains the offset of the location in the mmap buffer where perf sample data begins.
-    fn offset(&self) -> usize {
-        // DOCS(anp): need to document this minimum kernel version requirement
-        // data_offset (since Linux 4.1)
-        unsafe { (*self.metadata).data_offset as usize }
-    }
-
-    /// When the mapping is PROT_WRITE, the data_tail value should be written by user space to
-    /// reflect the last read data.  In this case, the kernel will not overwrite unread data.
-    fn set_tail(&mut self, new_tail: usize) {
-        // NOTE(anp): we guarantee PROT_WRITE in our constructors
-        fence(Ordering::Release); // i *think* this corresponds to mb() (mfence on x86)
-        unsafe {
-            (*self.metadata).data_tail = new_tail as u64;
-        }
+        self.header().head_index() == self.prev
     }
 }
 
@@ -178,7 +204,7 @@ impl RingBuffer {
     fn next_event_bytes(&mut self) -> Option<(EventHeader, Cow<[u8]>)> {
         let header_size = size_of::<perf_event_header>();
         unsafe {
-            self.end = self.head();
+            self.end = self.header().head_index();
 
             assert!(
                 self.end >= self.start,
@@ -192,10 +218,10 @@ impl RingBuffer {
                 return None;
             }
 
-            let data = self.base.offset(page_size() as isize);
+            let data = self.data_section_start;
 
             let raw_header: &perf_event_header =
-                &*(data.offset(self.start as isize) as *const perf_event_header);
+                &*(data.as_ptr().offset(self.start as isize) as *const perf_event_header);
             let header = ::sample::record::EventHeader::from(raw_header);
             let event_size = header.size;
 
@@ -213,8 +239,8 @@ impl RingBuffer {
                 (raw_header as *const _ as *const libc::c_void).offset(header_size as isize);
 
             let start = self.start;
-            self.set_tail(start);
-            self.prev = self.head();
+            self.header_mut().set_tail_index(start);
+            self.prev = self.header().head_index();
 
             None
         }
